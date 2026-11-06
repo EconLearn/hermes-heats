@@ -36,6 +36,11 @@ you> apply it
   middleware moves every file and terminal call an attempt makes into that attempt's worktree; a
   `pre_tool_call` hook refuses writes outside it and git commands that would change state the
   worktrees share with your checkout (`stash`, `branch -D`, `config`, `push`, ...).
+- **Laps: test feedback, not trust.** When an attempt says it is done, Heats runs your check in its
+  worktree. If the check still fails, Heats starts that attempt again in the same worktree and hands it
+  what it actually measured: which files changed (or that *nothing* did), the exit code, and the last
+  lines of the test output. Up to 3 laps per attempt by default. The first attempt that passes cleanly
+  ends the race and the others are stopped, so you do not wait for the slowest one.
 - **An objective judge.** Every attempt is scored by running your check command in its worktree. Ranking:
   passes the check → more tests passing → smaller diff → faster.
 - **Cheating cannot win.** An attempt that edits test files (or any path you protect) is flagged and
@@ -72,7 +77,7 @@ Ask the agent in plain words: *"use heats (3 attempts) to fix the failing parser
 
 | Tool | What it does |
 |---|---|
-| `heats_run(task, n=3, check=?, models=?, timeout_minutes=?, repo_path=?)` | Runs the race and returns the scoreboard. `check` is auto-detected (pytest, npm/pnpm/yarn test, cargo test, go test, make test) when omitted. |
+| `heats_run(task, n=3, check=?, models=?, timeout_minutes=?, laps=?, repo_path=?)` | Runs the race and returns the scoreboard. `check` is auto-detected (pytest, npm/pnpm/yarn test, cargo test, go test, make test) when omitted. |
 | `heats_apply(run_id, heat=?, force=?)` | Applies the winner's (or a named heat's) patch to your working tree, unstaged. |
 
 Without the agent:
@@ -97,6 +102,8 @@ hermes heats list|show|apply ... # same from the shell
 | `toolsets` | [terminal, file] | What each attempt may use (never broader than the parent) |
 | `protect_tests` | true | Attempts that edit tests cannot win |
 | `protected_paths` | [] | More files or folders an attempt may not change |
+| `laps` | 3 | Launches per attempt; a failing attempt is restarted with the measured check output |
+| `finish_early` | true | The first attempt that passes cleanly ends the race |
 | `run_baseline` | true | Run the check on the starting code too, for a before/after |
 
 ## What it does on your machine (disclosure)
