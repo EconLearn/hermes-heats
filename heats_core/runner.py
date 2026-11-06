@@ -247,6 +247,10 @@ class Runner:
 
             def stop_pending(reason: str, state: str) -> None:
                 for i in sorted(pending):
+                    # freeze the worktree first: every further tool call of this child is refused,
+                    # so the judge below sees a tree that is no longer changing
+                    for k in keys.get(i, []):
+                        self.isolation.block(k)
                     self.launcher.cancel(handles[i], reason)
                     hh = heats[i - 1]
                     hh.agent_state = state
@@ -289,22 +293,24 @@ class Runner:
                             self._judge, h, root, lanes[i][0], base, check, cfg, guard, run_dir)
                 if not pending and judging:
                     time.sleep(0.05)
-                for i in [i for i, f in judging.items() if f.done()]:
-                    fut = judging.pop(i)
-                    if fut.exception() is not None:
-                        continue  # reported below from `futures`
-                    h = heats[i - 1]
-                    if h.qualifies:
-                        if cfg.finish_early and not race_won:
-                            race_won = True
-                            self.progress(f"heats {run_id}: heat {i} passed; stopping the others")
-                            stop_pending(f"heat {i} already passed", "STOPPED")
-                        continue
+                done_now = [i for i, f in judging.items() if f.done()]
+                for i in done_now:
+                    judging.pop(i)
+                # decide on the whole batch at once: a pass anywhere in it ends the race before
+                # any failing heat in the same batch is sent on another lap
+                ok_now = [i for i in done_now if futures[i].exception() is None and heats[i - 1].qualifies]
+                if ok_now and cfg.finish_early and not race_won:
+                    race_won = True
+                    self.progress(f"heats {run_id}: heat {ok_now[0]} passed; stopping the others")
+                    stop_pending(f"heat {ok_now[0]} already passed", "STOPPED")
+                for i in done_now:
+                    if futures[i].exception() is not None or heats[i - 1].qualifies:
+                        continue  # exceptions are reported below from `futures`
                     left = deadline - time.monotonic()
                     if (laps_used[i] < max(1, cfg.laps) and not race_won and not stop_noted
                             and left > cfg.min_lap_s):
-                        self._next_lap(h, i, laps_used, cfg, check, lanes, handles, keys, t0, finished_children,
-                                       pending, errors, run_id)
+                        self._next_lap(heats[i - 1], i, laps_used, cfg, check, lanes, handles, keys, t0,
+                                       finished_children, pending, errors, run_id)
             for i, fut in futures.items():
                 try:
                     fut.result()
@@ -376,14 +382,30 @@ class Runner:
         except Exception as exc:
             errors.append(f"heat {i}: lap {lap} could not start: {exc}")
             return
-        for k in keys.get(i, []):        # the previous lap's child is finished: release its keys
-            self.isolation.remove(k)
-        keys[i] = [k for k in self.launcher.task_keys(handle) if k]
-        if lane is not None:
-            for k in keys[i]:
-                self.isolation.add(k, lane)
+        old_keys = keys.get(i, [])
+        # the new child is live from here on: track it before anything else can fail
         handles[i] = handle
         finished_children.discard(i)
+        keys[i] = []
+        try:
+            keys[i] = [k for k in self.launcher.task_keys(handle) if k]
+            if lane is None:
+                raise RuntimeError("no isolation lane for this heat")
+            for k in keys[i]:
+                self.isolation.add(k, lane)
+        except Exception as exc:
+            errors.append(f"heat {i}: lap {lap} could not be isolated, stopped it: {exc}")
+            for k in keys[i]:
+                self.isolation.block(k)
+            try:
+                self.launcher.cancel(handle, "Heats could not isolate this lap")
+            except Exception:
+                pass
+            keys[i] = keys[i] + old_keys
+            return
+        for k in old_keys:            # the previous lap's child is finished: release its keys
+            self.isolation.remove(k)
+        h.agent_summary = h.agent_error = ""
         laps_used[i] = lap
         h.laps = lap
         t0[i] = time.monotonic() - h.duration_s   # duration keeps counting across laps

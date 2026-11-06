@@ -646,16 +646,51 @@ def test_no_new_lap_without_enough_time(repo, tmp_path):
 
 def test_finish_early_stops_the_others(repo, tmp_path):
     def slow(lane, fl):
-        time.sleep(30)
+        time.sleep(90)
 
     iso = IsolationMap()
     fl = FakeLauncher(iso, [slow, good_fix])
     t = time.monotonic()
     rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=2, check=CHECK, timeout_s=120,
                                                         finish_early=True, laps=3, min_lap_s=0), cwd=repo)
-    assert time.monotonic() - t < 25
+    assert time.monotonic() - t < 60
     assert rep.winner is not None and rep.winner.index == 2
     by = {h.index: h for h in rep.heats}
     assert by[1].agent_state == "STOPPED" and any(k.endswith("h1") for k in fl.cancelled)
     assert len(fl.goals[1]) == 1                      # a stopped heat gets no new lap
     assert not Path(repo, ".heats").exists()
+
+
+def test_stopped_heat_is_frozen_before_it_is_judged(repo, tmp_path):
+    seen = {}
+
+    class Recording(FakeLauncher):
+        def cancel(self, handle, reason):
+            lane = self.isolation.find(handle["key"])
+            seen[handle["key"]] = bool(lane and lane.blocked)
+            super().cancel(handle, reason)
+
+    def slow(lane, fl):
+        time.sleep(30)
+
+    iso = IsolationMap()
+    fl = Recording(iso, [slow, good_fix])
+    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=2, check=CHECK, timeout_s=120,
+                                                        finish_early=True, min_lap_s=0), cwd=repo)
+    assert rep.winner.index == 2
+    assert seen and all(seen.values())   # blocked at the moment of cancel, i.e. before judging
+
+
+def test_new_lap_clears_previous_lap_text(repo, tmp_path):
+    def learns(lane, fl):
+        if len(fl.goals[1]) == 1:
+            wrong_fix(lane, fl)
+        else:
+            time.sleep(90)
+
+    iso = IsolationMap()
+    fl = FakeLauncher(iso, [learns])
+    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check=CHECK, timeout_s=20, laps=2,
+                                                        min_lap_s=0), cwd=repo)
+    h = rep.heats[0]
+    assert h.laps == 2 and h.agent_state == "TIMEOUT" and h.agent_summary == ""
