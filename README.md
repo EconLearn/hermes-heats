@@ -29,16 +29,26 @@ you> apply it
 
 ## Why it is more than a prompt
 
-- **Real isolation.** Each attempt works in its own git worktree, created from your current tree
-  *including uncommitted edits and untracked files*. A `tool_request` middleware moves every file and
-  terminal call an attempt makes into that attempt's worktree, so attempts cannot overwrite each
-  other or your checkout. A `pre_tool_call` hook refuses any write that would still land outside it.
+- **Real isolation.** Each attempt works in its own git worktree, created from your working tree
+  exactly as it is, *including uncommitted edits and untracked files* (snapshotted through a
+  temporary index: your index, stash and branches are never touched). Installed dependency folders
+  (`node_modules`, `.venv`, ...) are linked in so your test command works. A `tool_request`
+  middleware moves every file and terminal call an attempt makes into that attempt's worktree; a
+  `pre_tool_call` hook refuses writes outside it and git commands that would change state the
+  worktrees share with your checkout (`stash`, `branch -D`, `config`, `push`, ...).
 - **An objective judge.** Every attempt is scored by running your check command in its worktree. Ranking:
   passes the check → more tests passing → smaller diff → faster.
 - **Cheating cannot win.** An attempt that edits test files (or any path you protect) is flagged and
   cannot be the winner, even if the check passes.
 - **Nothing is lost or left behind.** Worktrees and branches are removed at the end; every attempt's
-  patch is saved. Heats fingerprints your checkout before and after and warns if anything changed.
+  patch is saved. Heats fingerprints your checkout (files, branches, stash, git config) before and
+  after and warns if anything changed. An attempt that is still running when the run ends is cut
+  off: every further tool call it makes is refused.
+- **Honest about claims.** An attempt that says "fixed, tests pass" but changed nothing is called
+  out on the scoreboard. Small models do this a lot.
+- **Safe apply.** The winner lands as an ordinary unstaged edit. If your files changed since the run
+  and the patch no longer applies cleanly, Heats refuses rather than mixing conflict markers into
+  uncommitted work. Applying the same run twice is refused.
 - **Diversity built in.** Attempts get different approaches (minimal fix, root cause, test-first,
   fresh eyes) and can race different models (`models: [qwen3:4b, your-cloud-model]`).
 
@@ -92,7 +102,8 @@ hermes heats list|show|apply ... # same from the shell
 ## What it does on your machine (disclosure)
 
 - Creates git worktrees under `<repo>/.heats/<run_id>/` (added to `.git/info/exclude`, never your
-  `.gitignore`) and branches `heats/<run_id>/h<N>`; removes both when the run ends.
+  `.gitignore`) and branches `heats/<run_id>/h<N>`; removes both when the run ends. Writes one
+  dangling snapshot commit (no ref; git's normal garbage collection removes it).
 - Runs your check command in each worktree (shell commands you chose, with your permissions).
 - Launches N subagents through Hermes's subagent lifecycle API; they use your delegation model and the
   normal approval rules. Cost scales with N.
@@ -104,6 +115,9 @@ hermes heats list|show|apply ... # same from the shell
 - Needs a git repository with at least one commit, and the local terminal backend.
 - Isolation is enforced for Hermes's file and terminal tools. A command that computes a path into your
   checkout at run time is not rewritten; the before/after fingerprint reports it if it happens.
+- Dependency folders are shared (symlinked), not copied: an attempt that runs `npm install` or
+  `pip install` changes your real `node_modules` / `.venv`.
+- Untracked files over 10 MB are left out of the attempts' copy of your tree.
 - Parallel attempts on one local GPU share it; the race is still useful, it just takes longer.
 
 ## Development
