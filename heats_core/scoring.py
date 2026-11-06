@@ -26,6 +26,7 @@ class HeatResult:
     check: Optional[CheckResult] = None
     patch_file: str = ""
     tokens: Optional[int] = None
+    laps: int = 1                    # child launches used (a failing heat may be relaunched with the check output)
 
     @property
     def changed(self) -> bool:
@@ -54,7 +55,7 @@ class HeatResult:
     def to_dict(self) -> dict:
         d = {k: getattr(self, k) for k in (
             "index", "strategy", "model", "agent_state", "agent_summary", "agent_error", "duration_s", "files",
-            "insertions", "deletions", "guarded", "escaped", "patch_file", "tokens")}
+            "insertions", "deletions", "guarded", "escaped", "patch_file", "tokens", "laps")}
         d["check"] = self.check.to_dict() if self.check else None
         d["qualifies"] = self.qualifies
         return d
@@ -111,6 +112,8 @@ def scoreboard(run_id: str, results: list[HeatResult], baseline: Optional[CheckR
             notes.append("claimed a fix but changed nothing" if claimed else "no changes")
         if r.agent_state not in ("SUCCEEDED",):
             notes.append(f"agent {r.agent_state.lower()}")
+        if r.laps > 1:
+            notes.append(f"{r.laps} laps")
         if r.escaped:
             notes.append(f"{r.escaped} path(s) redirected into its worktree")
         diff = f"+{r.insertions} -{r.deletions} ({len(r.files)} files)" if r.changed else "-"

@@ -85,6 +85,7 @@ function Lane({ h, isWinner }) {
           }),
           jsx('span', { className: 'font-medium', children: `Heat ${h.index}` }),
           jsx('span', { className: 'text-(--ui-text-tertiary)', children: h.strategy }),
+          h.lap > 1 ? jsx('span', { className: 'text-(--ui-text-quaternary)', title: 'restarted with the real test output', children: `lap ${h.lap}` }) : null,
           h.model ? jsx('span', { className: 'text-(--ui-text-quaternary) truncate', children: h.model }) : null,
           jsx('span', { className: 'ml-auto font-medium', style: { color: st.color }, children: isWinner ? `WINNER · ${st.label}` : st.label })
         ]

@@ -24,4 +24,6 @@ config_schema:
   toolsets: {type: list, default: ["terminal", "file"], label: "Attempt toolsets", description: "Toolsets each attempt may use (never broader than the parent's)."}
   protect_tests: {type: bool, default: true, label: "Protect tests", description: "An attempt that edits test files cannot win."}
   protected_paths: {type: list, default: [], label: "Other protected paths", description: "Files or folders an attempt may not change if it is to win."}
+  laps: {type: int, default: 3, label: "Laps per attempt", description: "If an attempt finishes but the check still fails, Heats restarts it in the same worktree with the real test output (up to this many times in total)."}
+  finish_early: {type: bool, default: true, label: "Finish at the first pass", description: "The first attempt that passes cleanly ends the race; the others are stopped and judged as they stand."}
   run_baseline: {type: bool, default: true, label: "Run the check before", description: "Run the check once on the starting code so the scoreboard shows before and after."}

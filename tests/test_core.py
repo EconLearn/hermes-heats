@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -294,10 +295,12 @@ class FakeLauncher:
         self.delay = delay
         self.handles = {}
         self.cancelled = []
+        self.goals = {}
 
     def launch(self, *, goal, context, model, key):
-        heat = int(key.rsplit("h", 1)[1])
+        heat = int(re.search(r"-h(\d+)(?:-lap\d+)?$", key).group(1))
         h = {"key": key, "heat": heat, "state": "RUNNING", "model": model, "goal": goal}
+        self.goals.setdefault(heat, []).append(goal)
         self.handles[key] = h
 
         def work():
@@ -601,3 +604,58 @@ def test_check_output_is_bounded_and_group_killed(tmp_path):
     assert r.ok and len(r.tail) <= 2000
     time.sleep(4)
     assert not marker.exists()  # the background child was killed with the group
+
+
+# ----------------------------------------------------------------- laps / finish early
+def test_failing_heat_gets_another_lap_with_real_check_output(repo, tmp_path):
+    def learns(lane, fl):
+        if len(fl.goals[1]) == 1:
+            wrong_fix(lane, fl)
+        else:
+            good_fix(lane, fl)
+
+    iso = IsolationMap()
+    fl = FakeLauncher(iso, [learns])
+    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check=CHECK, timeout_s=60, laps=3,
+                                                        min_lap_s=0), cwd=repo)
+    assert len(fl.goals[1]) == 2                      # stopped relaunching once it passed
+    second = fl.goals[1][1]
+    assert "lap 2 of 3" in second and "exited 1" in second and "calc.py" in second
+    assert rep.winner is not None and rep.winner.index == 1 and rep.heats[0].laps == 2
+    assert "2 laps" in rep.markdown()
+    assert len(iso) == 0                              # every lap's keys released
+    assert "a - b" in Path(repo, "calc.py").read_text()
+
+
+def test_lap_after_no_change_says_nothing_changed(repo, tmp_path):
+    iso = IsolationMap()
+    fl = FakeLauncher(iso, [lambda lane, fl: None])
+    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check=CHECK, timeout_s=60, laps=2,
+                                                        min_lap_s=0), cwd=repo)
+    assert len(fl.goals[1]) == 2 and "NOTHING has been changed" in fl.goals[1][1]
+    assert rep.winner is None and rep.heats[0].laps == 2
+
+
+def test_no_new_lap_without_enough_time(repo, tmp_path):
+    iso = IsolationMap()
+    fl = FakeLauncher(iso, [wrong_fix])
+    Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check=CHECK, timeout_s=60, laps=3,
+                                                  min_lap_s=120), cwd=repo)
+    assert len(fl.goals[1]) == 1
+
+
+def test_finish_early_stops_the_others(repo, tmp_path):
+    def slow(lane, fl):
+        time.sleep(30)
+
+    iso = IsolationMap()
+    fl = FakeLauncher(iso, [slow, good_fix])
+    t = time.monotonic()
+    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=2, check=CHECK, timeout_s=120,
+                                                        finish_early=True, laps=3, min_lap_s=0), cwd=repo)
+    assert time.monotonic() - t < 25
+    assert rep.winner is not None and rep.winner.index == 2
+    by = {h.index: h for h in rep.heats}
+    assert by[1].agent_state == "STOPPED" and any(k.endswith("h1") for k in fl.cancelled)
+    assert len(fl.goals[1]) == 1                      # a stopped heat gets no new lap
+    assert not Path(repo, ".heats").exists()

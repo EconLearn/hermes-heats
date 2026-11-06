@@ -133,6 +133,7 @@ HEATS_RUN = {
             "check": {"type": "string", "description": "Shell command that exits 0 when the task is solved, e.g. 'python -m pytest -q tests/test_parser.py'. Omit to auto-detect (pytest, npm/pnpm/yarn test, cargo test, go test, make test)."},
             "models": {"type": "array", "items": {"type": "string"}, "description": "Optional model names to race against each other; attempts cycle through them. Omit to use the delegation model."},
             "timeout_minutes": {"type": "number", "description": "Wall-clock limit for the attempts (default from settings, 15)."},
+            "laps": {"type": "integer", "description": "Max launches per attempt; a failing attempt is restarted with the check output (default from settings, 3)."},
             "repo_path": {"type": "string", "description": "Repository to work on (default: the session's working directory)."},
         },
         "required": ["task"],
@@ -177,6 +178,12 @@ def _handle_run(args: dict, **kwargs) -> str:
         timeout_min = float(args.get("timeout_minutes") or _setting("timeout_minutes", 15))
     except (TypeError, ValueError):
         return _err("timeout_minutes must be a number")
+    try:
+        laps = int(args.get("laps") or _setting("laps", 3))
+    except (TypeError, ValueError):
+        return _err("laps must be an integer")
+    if not 1 <= laps <= 10:
+        return _err("laps must be between 1 and 10")
     toolsets = tuple(_setting("toolsets", ["terminal", "file"]) or ()) or None
     cfg = RunConfig(
         task=task, n=n, check=args.get("check") or _setting("check", "") or None, models=models,
@@ -184,6 +191,7 @@ def _handle_run(args: dict, **kwargs) -> str:
         protect_tests=bool(_setting("protect_tests", True)),
         protected_paths=list(_setting("protected_paths", []) or []),
         run_baseline=bool(_setting("run_baseline", True)),
+        laps=laps, finish_early=bool(_setting("finish_early", True)),
     )
     cwd = os.path.expanduser(args.get("repo_path") or _cwd())
     if not os.path.isdir(cwd):

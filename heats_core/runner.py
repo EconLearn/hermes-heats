@@ -54,6 +54,9 @@ class RunConfig:
     protected_paths: list[str] = field(default_factory=list)
     run_baseline: bool = True
     keep_worktrees: bool = False
+    laps: int = 1                 # child launches per heat: a failing heat is relaunched with the check's output
+    finish_early: bool = False    # the first heat that qualifies ends the race (others are stopped and judged)
+    min_lap_s: float = 90         # do not start a new lap with less time than this left
 
 
 @dataclass
@@ -107,6 +110,41 @@ def build_goal(task: str, heat: int, n: int, strategy: str, check: str, worktree
         "(describing a change does nothing, only tool calls change files); "
         f"(3) run the check with the terminal tool: `{check}`; (4) if it fails, fix and run it again.\n"
         "Success is judged only by that command exiting 0 in your copy, checked independently after you finish. "
+        "Do not edit, delete or skip existing tests, and do not commit. "
+        "Finish with one sentence: what you changed and the check's actual result."
+    )
+
+
+def build_followup_goal(task: str, heat: int, lap: int, laps: int, check: str, worktree: str,
+                        h: HeatResult) -> str:
+    """Goal for the next lap of a heat whose last lap ended without passing. Everything stated here
+    was measured by Heats in the worktree, not taken from the previous lap's own claims."""
+    c = h.check
+    if h.files:
+        changed = f"files changed so far (kept in your copy): {', '.join(h.files[:8])} (+{h.insertions} -{h.deletions})"
+    else:
+        changed = ("NOTHING has been changed in your copy so far. Describing or planning a change does nothing: "
+                   "you must call write_file or patch")
+    if c is None:
+        result = "the check could not be run"
+    elif c.timed_out:
+        result = "the check timed out"
+    else:
+        counts = f", {c.passed or 0} passed / {c.failed or 0} failed" if (c.passed is not None or c.failed is not None) else ""
+        result = f"`{check}` exited {c.exit_code}{counts}"
+    guard = (f"\nYou edited protected test files ({', '.join(h.guarded[:5])}); an attempt that edits tests cannot win. "
+             "Restore them exactly (e.g. `git checkout -- <file>`) and fix the code instead.") if h.guarded else ""
+    tail = (c.tail if c else "")[-1500:]
+    return (
+        f"{task.strip()}\n\n"
+        f"---\nYou are continuing attempt {heat} (lap {lap} of {laps}) of a Heats run. "
+        f"Your own copy of the repository is at: {worktree}\n"
+        "Work only inside that directory; your file and terminal tools already start there.\n"
+        "The previous lap ended but the task is NOT done. Heats measured, just now:\n"
+        f"- {changed}\n- {result}{guard}\n"
+        f"Last lines of the check output:\n```\n{tail}\n```\n"
+        "Steps: (1) read the failing code and the output above; (2) change the code with write_file or patch; "
+        f"(3) run `{check}` with the terminal tool; (4) repeat until it exits 0. "
         "Do not edit, delete or skip existing tests, and do not commit. "
         "Finish with one sentence: what you changed and the check's actual result."
     )
@@ -199,11 +237,25 @@ class Runner:
             self.progress(f"heats {run_id}: {len(handles)} attempts running")
             self._emit("running", heats)
 
-            futures = {}
+            futures: dict[int, Any] = {}      # latest judge per heat (final once the heat is done)
+            judging: dict[int, Any] = {}      # judges whose outcome may still start another lap
+            laps_used = {i: 1 for i in handles}
             deadline = time.monotonic() + cfg.timeout_s
             pending = set(handles)
             stop_noted = False
-            while pending:
+            race_won = False
+
+            def stop_pending(reason: str, state: str) -> None:
+                for i in sorted(pending):
+                    self.launcher.cancel(handles[i], reason)
+                    hh = heats[i - 1]
+                    hh.agent_state = state
+                    hh._status = "judging"  # type: ignore[attr-defined]
+                    hh.duration_s = round(time.monotonic() - t0[i], 1)
+                    futures[i] = pool.submit(self._judge, hh, root, lanes[i][0], base, check, cfg, guard, run_dir)
+                pending.clear()
+
+            while pending or judging:
                 if not stop_noted and self.should_stop():
                     stop_noted = True
                     errors.append("stopped by the user")
@@ -211,15 +263,10 @@ class Runner:
                         self.launcher.cancel(handles[i], "Heats run stopped")
                     deadline = min(deadline, time.monotonic() + 20)
                 if time.monotonic() > deadline:
-                    for i in sorted(pending):
-                        self.launcher.cancel(handles[i], "Heats time limit reached")
-                        heats[i - 1].agent_state = "TIMEOUT"
-                        heats[i - 1]._status = "judging"  # type: ignore[attr-defined]
-                        heats[i - 1].duration_s = round(time.monotonic() - t0[i], 1)
-                        futures[i] = pool.submit(self._judge, heats[i - 1], root, lanes[i][0], base, check, cfg, guard, run_dir)
+                    stop_pending("Heats time limit reached", "TIMEOUT")
                     if not stop_noted:
                         errors.append(f"time limit {cfg.timeout_s:.0f}s reached; unfinished heats were judged as they stood")
-                    pending.clear()
+                    judging.clear()   # their judges are in `futures`; no further laps
                     break
                 for i in list(pending):
                     state = self.launcher.state(handles[i], wait_s=1.0 / max(1, len(pending)))
@@ -232,11 +279,32 @@ class Runner:
                         h.agent_state = res.get("state") or state
                         h.agent_summary = (res.get("summary") or "")[:600]
                         h.agent_error = (res.get("error") or "")[:300]
-                        h.tokens = res.get("tokens")
-                        self.progress(f"heats {run_id}: heat {i} finished ({h.agent_state.lower()}), judging")
+                        tok = res.get("tokens")
+                        if tok is not None:
+                            h.tokens = (h.tokens or 0) + tok
+                        self.progress(f"heats {run_id}: heat {i} lap {laps_used[i]} finished ({h.agent_state.lower()}), judging")
                         h._status = "judging"  # type: ignore[attr-defined]
                         self._emit("running", heats)
-                        futures[i] = pool.submit(self._judge, h, root, lanes[i][0], base, check, cfg, guard, run_dir)
+                        futures[i] = judging[i] = pool.submit(
+                            self._judge, h, root, lanes[i][0], base, check, cfg, guard, run_dir)
+                if not pending and judging:
+                    time.sleep(0.05)
+                for i in [i for i, f in judging.items() if f.done()]:
+                    fut = judging.pop(i)
+                    if fut.exception() is not None:
+                        continue  # reported below from `futures`
+                    h = heats[i - 1]
+                    if h.qualifies:
+                        if cfg.finish_early and not race_won:
+                            race_won = True
+                            self.progress(f"heats {run_id}: heat {i} passed; stopping the others")
+                            stop_pending(f"heat {i} already passed", "STOPPED")
+                        continue
+                    left = deadline - time.monotonic()
+                    if (laps_used[i] < max(1, cfg.laps) and not race_won and not stop_noted
+                            and left > cfg.min_lap_s):
+                        self._next_lap(h, i, laps_used, cfg, check, lanes, handles, keys, t0, finished_children,
+                                       pending, errors, run_id)
             for i, fut in futures.items():
                 try:
                     fut.result()
@@ -294,6 +362,36 @@ class Runner:
         return report
 
     # ------------------------------------------------------------ helpers
+    def _next_lap(self, h: HeatResult, i: int, laps_used: dict, cfg: RunConfig, check: str, lanes: dict,
+                  handles: dict, keys: dict, t0: dict, finished_children: set, pending: set,
+                  errors: list, run_id: str) -> None:
+        """Relaunch heat *i* in its own worktree with what the last lap left behind."""
+        lap = laps_used[i] + 1
+        wt = lanes[i][0]
+        lane = getattr(h, "_lane", None)
+        goal = build_followup_goal(cfg.task, i, lap, cfg.laps, check, wt, h)
+        try:
+            handle = self.launcher.launch(goal=goal, context=f"Repository copy: {wt}", model=h.model,
+                                          key=f"heats-{run_id}-h{i}-lap{lap}")
+        except Exception as exc:
+            errors.append(f"heat {i}: lap {lap} could not start: {exc}")
+            return
+        for k in keys.get(i, []):        # the previous lap's child is finished: release its keys
+            self.isolation.remove(k)
+        keys[i] = [k for k in self.launcher.task_keys(handle) if k]
+        if lane is not None:
+            for k in keys[i]:
+                self.isolation.add(k, lane)
+        handles[i] = handle
+        finished_children.discard(i)
+        laps_used[i] = lap
+        h.laps = lap
+        t0[i] = time.monotonic() - h.duration_s   # duration keeps counting across laps
+        h._status = "running"  # type: ignore[attr-defined]
+        pending.add(i)
+        self.progress(f"heats {run_id}: heat {i} did not pass; lap {lap} of {cfg.laps} started")
+        self._emit("running", self._heats_ref)
+
     def _emit(self, phase: str, heats: list[HeatResult], **extra) -> None:
         """Push a snapshot of the run to the live view (Desktop pane). Never raises."""
         if self.on_update is None:
@@ -312,6 +410,7 @@ class Runner:
                         "check_ok": bool(c and c.ok), "insertions": h.insertions, "deletions": h.deletions,
                         "files": len(h.files), "guarded": bool(h.guarded), "qualifies": h.qualifies,
                         "claimed_unchanged": bool(c and not h.changed and h.agent_summary),
+                        "lap": h.laps,
                     })
                 self._live["heats"] = rows
                 if phase == "done":
