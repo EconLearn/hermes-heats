@@ -5,7 +5,7 @@ api_version: 1
 description: "Race N attempts at a coding task in parallel git worktrees; the repo's own tests pick the winner, which you apply with one call."
 author: EconLearn
 license: MIT
-requires_hermes: ">=0.21.5"
+requires_hermes: ">=0.23.0"
 tags: [coding, git, worktrees, subagents, testing, best-of-n]
 provides_tools:
   - heats_run
