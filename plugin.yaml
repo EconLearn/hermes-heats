@@ -1,0 +1,27 @@
+name: heats
+version: "0.1.0"
+manifest_version: 2
+api_version: 1
+description: "Race N attempts at a coding task in parallel git worktrees; the repo's own tests pick the winner, which you apply with one call."
+author: EconLearn
+license: MIT
+requires_hermes: ">=0.21.5"
+tags: [coding, git, worktrees, subagents, testing, best-of-n]
+provides_tools:
+  - heats_run
+  - heats_apply
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+provides_middleware:
+  - tool_request
+config_schema:
+  default_heats: {type: int, default: 3, label: "Attempts per run", description: "How many attempts run in parallel when the request does not say (1-8)."}
+  timeout_minutes: {type: float, default: 15, label: "Time limit (minutes)", description: "Unfinished attempts are stopped and judged as they stand."}
+  check: {type: str, default: "", label: "Check command", description: "Command that exits 0 on success. Empty = auto-detect (pytest, npm/pnpm/yarn test, cargo test, go test, make test)."}
+  check_timeout_seconds: {type: int, default: 600, label: "Check timeout (seconds)"}
+  models: {type: list, default: [], label: "Models to race", description: "Optional model names; attempts cycle through them. Empty = the delegation model."}
+  toolsets: {type: list, default: ["terminal", "file"], label: "Attempt toolsets", description: "Toolsets each attempt may use (never broader than the parent's)."}
+  protect_tests: {type: bool, default: true, label: "Protect tests", description: "An attempt that edits test files cannot win."}
+  protected_paths: {type: list, default: [], label: "Other protected paths", description: "Files or folders an attempt may not change if it is to win."}
+  run_baseline: {type: bool, default: true, label: "Run the check before", description: "Run the check once on the starting code so the scoreboard shows before and after."}
