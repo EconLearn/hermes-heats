@@ -145,9 +145,8 @@ _NUMSTAT = re.compile(r"^(\d+|-)\t(\d+|-)\t(.+)$")
 
 def collect_patch(wt: str, base: str, ignore: tuple[str, ...] = ()) -> Patch:
     """Everything the heat changed relative to *base* (tracked, new and deleted files)."""
-    _must(git(["add", "-A", "--", "."], cwd=wt, timeout=120), "git add in heat")
-    for rel in ignore:
-        git(["reset", "--quiet", "--", rel], cwd=wt)
+    excludes = [f":(exclude,literal){rel}" for rel in ignore]
+    _must(git(["add", "-A", "--", ".", *excludes], cwd=wt, timeout=120), "git add in heat")
     text = _must(git(["diff", "--cached", "--binary", base], cwd=wt, timeout=120), "git diff in heat")
     stat = git(["diff", "--cached", "--numstat", base], cwd=wt, timeout=120)
     files, ins, dels = [], 0, 0
@@ -192,3 +191,33 @@ def tree_fingerprint(root: str) -> str:
     st = git(["status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).heats"], cwd=root, timeout=120)
     df = git(["diff", "--binary", "HEAD", "--", ".", ":(exclude).heats"], cwd=root, timeout=120)
     return hashlib.sha256((st.stdout + "\0" + df.stdout).encode("utf-8", "replace")).hexdigest()
+
+
+DEPENDENCY_DIRS = ("node_modules", ".venv", "venv", ".tox", "vendor/bundle", ".yarn/cache", "bower_components")
+
+
+def link_dependency_dirs(root: str, wt: str, limit: int = 200) -> list[str]:
+    """Symlink ignored dependency folders (node_modules, .venv, ...) from the main checkout into a
+    heat, so the check command finds the installed dependencies. Returns the linked paths."""
+    cp = git(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"], cwd=root, timeout=120)
+    if cp.returncode != 0:
+        return []
+    linked = []
+    for line in cp.stdout.splitlines():
+        rel = line.strip().rstrip("/")
+        if not rel or rel.startswith(".heats"):
+            continue
+        if not any(rel == d or rel.endswith("/" + d) for d in DEPENDENCY_DIRS):
+            continue
+        src, dst = Path(root) / rel, Path(wt) / rel
+        if not src.is_dir() or dst.exists() or dst.is_symlink():
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(src, dst, target_is_directory=True)
+            linked.append(rel)
+        except OSError:
+            continue
+        if len(linked) >= limit:
+            break
+    return linked

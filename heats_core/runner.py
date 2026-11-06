@@ -150,6 +150,7 @@ class Runner:
 
         heats: list[HeatResult] = []
         self._heats_ref = heats
+        self._linked: dict[str, tuple] = {}
         lanes: dict[int, tuple[str, str]] = {}
         for i in range(1, n + 1):
             name, text = DEFAULT_STRATEGIES[(i - 1) % len(DEFAULT_STRATEGIES)]
@@ -160,6 +161,7 @@ class Runner:
             gitops.add_worktree(root, path, branch, base)
             if untracked:
                 gitops.copy_untracked(root, path, untracked)
+            self._linked[os.path.realpath(path)] = tuple(gitops.link_dependency_dirs(root, path))
             lanes[i] = (os.path.realpath(path), branch)
         self.progress(f"heats {run_id}: {n} worktrees ready from {base[:8]}{' (+uncommitted)' if dirty else ''}")
         self._live = {"run_id": run_id, "repo": os.path.basename(root), "root": root, "check": check,
@@ -307,13 +309,14 @@ class Runner:
         try:
             if untracked:
                 gitops.copy_untracked(root, path, untracked)
+            gitops.link_dependency_dirs(root, path)
             return run_check(check, path, timeout_s=cfg.check_timeout_s)
         finally:
             gitops.remove_worktree(root, path, branch)
 
     def _judge(self, h: HeatResult, root: str, wt: str, base: str, check: str, cfg: RunConfig,
                guard: Guard, run_dir: Path) -> None:
-        patch = gitops.collect_patch(wt, base)
+        patch = gitops.collect_patch(wt, base, ignore=self._linked.get(os.path.realpath(wt), ()))
         h.files, h.insertions, h.deletions = patch.files, patch.insertions, patch.deletions
         h.guarded = guard.violations(patch.files)
         pf = run_dir / f"heat{h.index}.patch"

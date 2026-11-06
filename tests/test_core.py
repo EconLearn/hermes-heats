@@ -440,3 +440,27 @@ def test_broken_update_callback_does_not_break_run(repo, tmp_path):
     rep = Runner(FakeLauncher(iso, [good_fix]), iso, tmp_path / "d", on_update=boom).run(
         RunConfig(task="t", n=1, check=CHECK, timeout_s=60, run_baseline=False), cwd=repo)
     assert rep.winner is not None
+
+
+def test_dependency_dirs_are_linked_not_copied(repo):
+    Path(repo, ".gitignore").write_text("node_modules/\n.venv/\n")
+    subprocess.run("git -c user.email=t@t -c user.name=t add .gitignore && git -c user.email=t@t -c user.name=t commit -qm gi",
+                   cwd=repo, shell=True, check=True)
+    (Path(repo) / "node_modules" / "left-pad").mkdir(parents=True)
+    (Path(repo) / "node_modules" / "left-pad" / "index.js").write_text("module.exports=1")
+    (Path(repo) / "web" / "node_modules").mkdir(parents=True)
+    (Path(repo) / ".venv" / "bin").mkdir(parents=True)
+    (Path(repo) / "build").mkdir()  # ignored? no: untracked, not a dependency dir
+    base, _ = gitops.snapshot_base(repo)
+    wt = os.path.join(repo, ".heats", "d", "h1")
+    gitops.add_worktree(repo, wt, "heats/d/h1", base)
+    linked = gitops.link_dependency_dirs(repo, wt)
+    assert sorted(linked) == [".venv", "node_modules", "web/node_modules"]  # nested (monorepo) ones too
+    assert os.path.islink(os.path.join(wt, "node_modules"))
+    assert Path(wt, "node_modules", "left-pad", "index.js").exists()
+    # the symlinks must never end up in the heat's patch
+    Path(wt, "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    p = gitops.collect_patch(wt, base, ignore=tuple(linked))
+    assert p.files == ["calc.py"], p.files
+    gitops.remove_worktree(repo, wt, "heats/d/h1")
+    assert Path(repo, "node_modules", "left-pad", "index.js").exists()  # removing the heat kept the real folder
