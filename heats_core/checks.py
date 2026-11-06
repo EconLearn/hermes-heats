@@ -98,38 +98,45 @@ def parse_counts(output: str) -> tuple[Optional[int], Optional[int]]:
     return None, None
 
 
-def run_check(command: str, cwd: str, timeout_s: float = 600, env_extra: Optional[dict] = None) -> CheckResult:
-    """Run *command* in *cwd* through the shell; kill the whole process group on timeout."""
+def run_check(command: str, cwd: str, timeout_s: float = 600, env_extra: Optional[dict] = None,
+              max_output_bytes: int = 8_000_000) -> CheckResult:
+    """Run *command* in *cwd* through the shell. Output goes to a temp file (memory stays flat), the
+    whole process group is killed afterwards (so servers a test suite started do not linger), and
+    only the tail is kept."""
+    import tempfile
     env = dict(os.environ)
     env.update({"CI": "1", "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1", "FORCE_COLOR": "0"})
     env.pop("PYTEST_ADDOPTS", None)
     if env_extra:
         env.update(env_extra)
     start = time.monotonic()
-    try:
-        proc = subprocess.Popen(
-            command, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-            start_new_session=True,
-        )
-    except OSError as exc:
-        return CheckResult(command, None, 0.0, error=f"could not start the check: {exc}")
-    try:
-        out, _ = proc.communicate(timeout=timeout_s)
-        timed_out = False
-    except subprocess.TimeoutExpired:
+    with tempfile.TemporaryFile() as out:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            proc = subprocess.Popen(command, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as exc:
+            return CheckResult(command, None, 0.0, error=f"could not start the check: {exc}")
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # the group: also children that outlived the shell
         except OSError:
-            proc.kill()
-        out, _ = proc.communicate()
-        timed_out = True
-    dur = round(time.monotonic() - start, 2)
-    out = out or ""
-    passed, failed = parse_counts(out)
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        dur = round(time.monotonic() - start, 2)
+        size = out.seek(0, os.SEEK_END)
+        out.seek(max(0, size - min(size, max_output_bytes)))
+        text = out.read().decode("utf-8", "replace")
+    passed, failed = parse_counts(text[-200_000:])
     return CheckResult(
         command=command, exit_code=None if timed_out else proc.returncode, duration_s=dur,
-        passed=passed, failed=failed, timed_out=timed_out, tail=out[-OUTPUT_TAIL_CHARS:],
+        passed=passed, failed=failed, timed_out=timed_out, tail=text[-OUTPUT_TAIL_CHARS:],
         error=f"timed out after {timeout_s:.0f}s" if timed_out else "",
     )
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .heats_core import gitops
-from .heats_core.isolation import IsolationMap, note_terminal_result, rewrite
+from .heats_core.isolation import IsolationMap, note_terminal_result, rewrite, shared_git_command
 from .heats_core.runner import MAX_HEATS, RunConfig, Runner, apply_heat, list_runs, load_report
 
 logger = logging.getLogger(__name__)
@@ -169,8 +169,14 @@ def _handle_run(args: dict, **kwargs) -> str:
         return _err("n must be an integer")
     if not 1 <= n <= MAX_HEATS:
         return _err(f"n must be between 1 and {MAX_HEATS}")
-    models = [m for m in (args.get("models") or _setting("models", []) or []) if isinstance(m, str) and m.strip()]
-    timeout_min = float(args.get("timeout_minutes") or _setting("timeout_minutes", 15))
+    raw_models = args.get("models") or _setting("models", []) or []
+    if isinstance(raw_models, str):
+        raw_models = [m.strip() for m in raw_models.split(",")]
+    models = [m.strip() for m in raw_models if isinstance(m, str) and m.strip()]
+    try:
+        timeout_min = float(args.get("timeout_minutes") or _setting("timeout_minutes", 15))
+    except (TypeError, ValueError):
+        return _err("timeout_minutes must be a number")
     toolsets = tuple(_setting("toolsets", ["terminal", "file"]) or ()) or None
     cfg = RunConfig(
         task=task, n=n, check=args.get("check") or _setting("check", "") or None, models=models,
@@ -216,7 +222,20 @@ def _handle_apply(args: dict, **kwargs) -> str:
         return _err(str(exc))
     except Exception as exc:
         return _err(f"heats_apply failed: {exc}")
+    if ok:
+        _mark_live_applied(run_id, args.get("heat"))
     return json.dumps({"ok": ok, "message": msg})
+
+
+def _mark_live_applied(run_id: str, heat) -> None:
+    try:
+        path = _data_dir() / "live.json"
+        live = json.loads(path.read_text(encoding="utf-8"))
+        if live.get("run_id") == run_id:
+            live["applied"] = int(heat) if heat else live.get("winner")
+            _publish(live)
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------- isolation seams
@@ -226,6 +245,8 @@ def _lane_for(kwargs: dict):
 
 def _mw_tool_request(tool_name: str = "", args: Optional[dict] = None, **kwargs):
     lane = _lane_for(kwargs)
+    if lane is not None and lane.blocked:
+        return None  # pre_tool_call refuses the call
     if os.environ.get("HEATS_DEBUG") and len(_ISOLATION):
         logger.warning("heats debug: %s task_id=%s session_id=%s lane=%s", tool_name, kwargs.get("task_id"),
                        kwargs.get("session_id"), getattr(lane, "heat", None))
@@ -239,7 +260,17 @@ def _mw_tool_request(tool_name: str = "", args: Optional[dict] = None, **kwargs)
 
 def _on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, **kwargs):
     lane = _lane_for(kwargs)
-    if lane is None or tool_name not in _WRITE_TOOLS:
+    if lane is None:
+        return None
+    if lane.blocked:
+        return {"action": "block", "message": f"Heats: the run for attempt {lane.heat} has ended; stop now."}
+    if tool_name == "terminal":
+        sub = shared_git_command((args or {}).get("command"))
+        if sub:
+            return {"action": "block", "message": (f"Heats: `git {sub}` changes state shared with the user's own "
+                                                   "checkout and is not allowed in an attempt. Edit files and run the check instead.")}
+        return None
+    if tool_name not in _WRITE_TOOLS:
         return None
     p = (args or {}).get("path")
     if isinstance(p, str) and p:
@@ -292,6 +323,8 @@ def _cmd(raw: str = "", **_) -> str:
         if sub == "apply" and len(parts) >= 2:
             heat = next((int(p) for p in parts[2:] if p.isdigit()), None)
             ok, msg = apply_heat(data, parts[1], heat, "--force" in parts)
+            if ok:
+                _mark_live_applied(parts[1], heat)
             return msg
     except FileNotFoundError as exc:
         return str(exc)

@@ -137,7 +137,6 @@ class Runner:
             raise gitops.HeatsGitError(
                 "could not find a test command for this repo; pass check='<command that exits 0 on success>'")
         base, dirty = gitops.snapshot_base(root)
-        untracked = gitops.untracked_files(root)
         fingerprint = gitops.tree_fingerprint(root)
         run_id = new_run_id()
         run_dir = self.data_dir / "runs" / run_id
@@ -149,33 +148,35 @@ class Runner:
         errors: list[str] = []
 
         heats: list[HeatResult] = []
-        self._heats_ref = heats
-        self._linked: dict[str, tuple] = {}
-        lanes: dict[int, tuple[str, str]] = {}
         for i in range(1, n + 1):
-            name, text = DEFAULT_STRATEGIES[(i - 1) % len(DEFAULT_STRATEGIES)]
+            name, _ = DEFAULT_STRATEGIES[(i - 1) % len(DEFAULT_STRATEGIES)]
             model = cfg.models[(i - 1) % len(cfg.models)] if cfg.models else None
             heats.append(HeatResult(index=i, strategy=name, model=model))
-            path = str(wt_root / f"h{i}")
-            branch = f"heats/{run_id}/h{i}"
-            gitops.add_worktree(root, path, branch, base)
-            if untracked:
-                gitops.copy_untracked(root, path, untracked)
-            self._linked[os.path.realpath(path)] = tuple(gitops.link_dependency_dirs(root, path))
-            lanes[i] = (os.path.realpath(path), branch)
-        self.progress(f"heats {run_id}: {n} worktrees ready from {base[:8]}{' (+uncommitted)' if dirty else ''}")
+        self._heats_ref = heats
+        self._linked: dict[str, tuple] = {}
         self._live = {"run_id": run_id, "repo": os.path.basename(root), "root": root, "check": check,
                       "n": n, "task": cfg.task[:300], "started_at": started, "winner": None, "baseline": None}
-        self._emit("starting", heats)
-
-        baseline: Optional[CheckResult] = None
-        pool = ThreadPoolExecutor(max_workers=min(4, n + 1), thread_name_prefix="heats-check")
-        base_future = pool.submit(self._baseline, root, base, run_id, untracked, check, cfg) if cfg.run_baseline else None
-
+        lanes: dict[int, tuple[str, str]] = {}
         handles: dict[int, Any] = {}
         keys: dict[int, list[str]] = {}
         t0: dict[int, float] = {}
+        finished_children: set[int] = set()
+        baseline: Optional[CheckResult] = None
+        pool = ThreadPoolExecutor(max_workers=min(4, n + 1), thread_name_prefix="heats-check")
+        completed = False
         try:
+            for h in heats:
+                path = str(wt_root / f"h{h.index}")
+                branch = f"heats/{run_id}/h{h.index}"
+                lanes[h.index] = (path, branch)  # recorded first, so cleanup covers a half-made worktree
+                gitops.add_worktree(root, path, branch, base)
+                real = os.path.realpath(path)
+                lanes[h.index] = (real, branch)
+                self._linked[real] = tuple(gitops.link_dependency_dirs(root, real))
+            self.progress(f"heats {run_id}: {n} worktrees ready from {base[:8]}{' (your working tree)' if dirty else ''}")
+            self._emit("starting", heats)
+            base_future = pool.submit(self._baseline, root, base, run_id, check, cfg) if cfg.run_baseline else None
+
             for h in heats:
                 wt, _ = lanes[h.index]
                 strategy_text = dict(DEFAULT_STRATEGIES)[h.strategy]
@@ -185,44 +186,46 @@ class Runner:
                     handle = self.launcher.launch(goal=goal, context=f"Repository copy: {wt}", model=h.model, key=key)
                 except Exception as exc:  # launch refused: record and carry on with the others
                     h.agent_state, h.agent_error = "FAILED", f"launch failed: {exc}"
+                    h._status = "error"  # type: ignore[attr-defined]
                     continue
-                handles[h.index] = handle
-                t0[h.index] = time.monotonic()
-                h._status = "running"  # type: ignore[attr-defined]
                 lane = Lane(root=root, worktree=wt, heat=h.index)
                 keys[h.index] = [k for k in self.launcher.task_keys(handle) if k]
                 for k in keys[h.index]:
                     self.isolation.add(k, lane)
+                handles[h.index] = handle
+                t0[h.index] = time.monotonic()
+                h._status = "running"  # type: ignore[attr-defined]
                 h._lane = lane  # type: ignore[attr-defined]
-            for h in heats:
-                if h.agent_error and not hasattr(h, "_status"):
-                    h._status = "error"  # type: ignore[attr-defined]
             self.progress(f"heats {run_id}: {len(handles)} attempts running")
             self._emit("running", heats)
 
             futures = {}
             deadline = time.monotonic() + cfg.timeout_s
             pending = set(handles)
+            stop_noted = False
             while pending:
-                if self.should_stop():
+                if not stop_noted and self.should_stop():
+                    stop_noted = True
                     errors.append("stopped by the user")
                     for i in pending:
                         self.launcher.cancel(handles[i], "Heats run stopped")
                     deadline = min(deadline, time.monotonic() + 20)
                 if time.monotonic() > deadline:
-                    for i in list(pending):
+                    for i in sorted(pending):
                         self.launcher.cancel(handles[i], "Heats time limit reached")
                         heats[i - 1].agent_state = "TIMEOUT"
                         heats[i - 1]._status = "judging"  # type: ignore[attr-defined]
                         heats[i - 1].duration_s = round(time.monotonic() - t0[i], 1)
                         futures[i] = pool.submit(self._judge, heats[i - 1], root, lanes[i][0], base, check, cfg, guard, run_dir)
-                    errors.append(f"time limit {cfg.timeout_s:.0f}s reached; unfinished heats were judged as they stood")
+                    if not stop_noted:
+                        errors.append(f"time limit {cfg.timeout_s:.0f}s reached; unfinished heats were judged as they stood")
                     pending.clear()
                     break
                 for i in list(pending):
                     state = self.launcher.state(handles[i], wait_s=1.0 / max(1, len(pending)))
                     if state in TERMINAL_STATES:
                         pending.discard(i)
+                        finished_children.add(i)
                         h = heats[i - 1]
                         h.duration_s = round(time.monotonic() - t0[i], 1)
                         res = self.launcher.result(handles[i]) or {}
@@ -245,15 +248,30 @@ class Runner:
                     self._live["baseline"] = {"ok": baseline.ok, "passed": baseline.passed, "failed": baseline.failed}
                 except Exception as exc:
                     errors.append(f"baseline check failed to run: {exc}")
+            completed = True
         finally:
             pool.shutdown(wait=True)
+            # Children that were cancelled may still be finishing their last step. Give them a moment;
+            # any that are still alive stay BLOCKED (every tool call refused), never un-isolated.
+            grace = time.monotonic() + 20
+            for i in sorted(set(handles) - finished_children):
+                while time.monotonic() < grace:
+                    try:
+                        if self.launcher.state(handles[i], wait_s=0.5) in TERMINAL_STATES:
+                            finished_children.add(i)
+                            break
+                    except Exception:
+                        break
+            for i, ks in keys.items():
+                for k in ks:
+                    if i in finished_children:
+                        self.isolation.remove(k)
+                    else:
+                        self.isolation.block(k)
             for h in heats:
                 lane = getattr(h, "_lane", None)
                 if lane is not None:
                     h.escaped = lane.redirects
-            for ks in keys.values():
-                for k in ks:
-                    self.isolation.remove(k)
             if not cfg.keep_worktrees:
                 for i, (path, branch) in lanes.items():
                     gitops.remove_worktree(root, path, branch)
@@ -262,10 +280,12 @@ class Runner:
                     (Path(root) / ".heats").rmdir()
                 except OSError:
                     pass
+            if not completed:
+                self._emit("error", heats, errors=errors + ["the run stopped early because of an error"])
 
         if gitops.tree_fingerprint(root) != fingerprint:
-            errors.append("your main checkout changed while the heats ran (by you, or by an attempt that escaped "
-                          "its worktree); check `git status` before applying a winner")
+            errors.append("your main checkout changed while the heats ran (files, branches, stash or git config; by you, "
+                          "or by an attempt that escaped its worktree); check `git status` before applying a winner")
         report = RunReport(run_id, root, base, dirty, check, baseline, heats, started, time.time(), str(run_dir), errors)
         (run_dir / "report.json").write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
         (run_dir / "scoreboard.md").write_text(report.markdown(), encoding="utf-8")
@@ -302,13 +322,11 @@ class Runner:
         except Exception:
             pass
 
-    def _baseline(self, root, base, run_id, untracked, check, cfg) -> CheckResult:
+    def _baseline(self, root, base, run_id, check, cfg) -> CheckResult:
         path = str(Path(root) / ".heats" / run_id / "h0")
         branch = f"heats/{run_id}/h0"
-        gitops.add_worktree(root, path, branch, base)
         try:
-            if untracked:
-                gitops.copy_untracked(root, path, untracked)
+            gitops.add_worktree(root, path, branch, base)
             gitops.link_dependency_dirs(root, path)
             return run_check(check, path, timeout_s=cfg.check_timeout_s)
         finally:
@@ -320,7 +338,7 @@ class Runner:
         h.files, h.insertions, h.deletions = patch.files, patch.insertions, patch.deletions
         h.guarded = guard.violations(patch.files)
         pf = run_dir / f"heat{h.index}.patch"
-        pf.write_text(patch.text, encoding="utf-8")
+        pf.write_bytes(patch.data)
         h.patch_file = str(pf)
         h.check = run_check(check, wt, timeout_s=cfg.check_timeout_s)
         h._status = "pass" if h.qualifies else ("flagged" if h.check.ok else "fail")  # type: ignore[attr-defined]
@@ -362,8 +380,18 @@ def apply_heat(data_dir: str | Path, run_id: str, heat: Optional[int] = None, fo
     patch_path = Path(entry.get("patch_file") or "")
     if not patch_path.is_file():
         return False, f"the patch for heat {idx} is missing ({patch_path})"
-    ok, msg = gitops.apply_patch(rep["root"], patch_path.read_text(encoding="utf-8"))
+    if rep.get("applied") and not force:
+        return False, (f"heat {rep['applied'].get('heat')} of {run_id} was already applied at {rep['applied'].get('at')}; "
+                       "pass force=true to apply again")
+    if not Path(rep["root"]).is_dir() or gitops.repo_root(rep["root"]) != os.path.realpath(rep["root"]):
+        return False, f"the run's repository {rep['root']} is no longer a git checkout"
+    ok, msg = gitops.apply_patch(rep["root"], patch_path.read_bytes())
     if ok:
+        rep["applied"] = {"heat": int(idx), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        try:
+            (Path(data_dir) / "runs" / run_id / "report.json").write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        except OSError:
+            pass
         files = ", ".join(entry.get("files", [])[:6])
         return True, f"applied heat {idx} of {run_id} to {rep['root']} ({msg}). Changed: {files}. Review with `git diff`."
     return False, f"could not apply heat {idx}: {msg}"

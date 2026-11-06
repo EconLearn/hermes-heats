@@ -27,6 +27,7 @@ class Lane:
     heat: int
     redirects: int = 0      # calls that aimed at the main checkout and were moved into the worktree
     cwd: str = ""           # last directory the heat's terminal reported (inside the worktree)
+    blocked: bool = False   # the run ended while this child was still alive: refuse all its tool calls
 
     def default_dir(self) -> str:
         return self.cwd if self.cwd and _inside(self.cwd, self.worktree) else self.worktree
@@ -44,6 +45,12 @@ class IsolationMap:
     def remove(self, key: str) -> Optional[Lane]:
         with self._lock:
             return self._lanes.pop(key, None)
+
+    def block(self, key: str) -> None:
+        with self._lock:
+            lane = self._lanes.get(key)
+            if lane is not None:
+                lane.blocked = True
 
     def find(self, *keys: Any) -> Optional[Lane]:
         with self._lock:
@@ -66,7 +73,8 @@ def map_path(p: str, lane: Lane, base: Optional[str] = None) -> str:
         return p
     expanded = os.path.expanduser(p)
     if not os.path.isabs(expanded):
-        return os.path.normpath(os.path.join(base or lane.default_dir(), expanded))
+        expanded = os.path.join(base or lane.default_dir(), expanded)
+        # falls through: a relative path that climbs out ("../../src/x.py") is mapped like an absolute one
     norm = os.path.normpath(expanded)
     real = os.path.realpath(norm)
     for cand in (norm, real):
@@ -75,6 +83,8 @@ def map_path(p: str, lane: Lane, base: Optional[str] = None) -> str:
     for cand in (norm, real):
         if _inside(cand, lane.root):
             rel = os.path.relpath(cand, lane.root)
+            if rel == ".heats" or rel.startswith(".heats" + os.sep):  # another heat's worktree
+                return lane.worktree
             return os.path.normpath(os.path.join(lane.worktree, rel))
     return norm
 
@@ -154,3 +164,21 @@ def note_terminal_result(result: Any, lane: Lane) -> None:
     cwd = data.get("cwd") if isinstance(data, dict) else None
     if isinstance(cwd, str) and _inside(os.path.normpath(cwd), lane.worktree):
         lane.cwd = os.path.normpath(cwd)
+
+
+# git state that every worktree shares with the user's checkout: a heat must not change it.
+_SHARED_GIT = re.compile(
+    r"(?:^|[;&|(]\s*|\bthen\s+|\bdo\s+)git(?:\s+-[cC]\s+\S+)*\s+"
+    r"(stash|config|worktree|gc|prune|push|remote|update-ref|reflog|filter-branch|filter-repo|notes|"
+    r"submodule|lfs|branch\s+(?:.*\s)?(?:-[dDmMcC]\b|--delete|--move|--copy|--force|-f\b)|tag\s+(?:.*\s)?(?:-d\b|--delete)|"
+    r"checkout\s+(?:.*\s)?-B\b|switch\s+(?:.*\s)?-C\b)",
+    re.I,
+)
+
+
+def shared_git_command(command: Any) -> Optional[str]:
+    """The git subcommand in *command* that would change state shared with the user's checkout, or None."""
+    if not isinstance(command, str) or "git" not in command:
+        return None
+    m = _SHARED_GIT.search(command)
+    return m.group(1).split()[0] if m else None

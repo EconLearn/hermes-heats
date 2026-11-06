@@ -70,4 +70,13 @@ async def apply(body: dict):
         ok, msg = _runner().apply_heat(_data_dir(), run_id, int(heat) if heat else None, False)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    if ok:
+        live_path = _data_dir() / "live.json"
+        try:
+            live = json.loads(live_path.read_text(encoding="utf-8"))
+            if live.get("run_id") == run_id:
+                live["applied"] = int(heat) if heat else live.get("winner")
+                live_path.write_text(json.dumps(live), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
     return {"ok": ok, "message": msg}

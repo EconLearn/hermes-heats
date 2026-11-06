@@ -107,7 +107,7 @@ function HeatsPane({ ctx }) {
   const [busy, setBusy] = useState(false)
   const [applied, setApplied] = useState(null)
 
-  useEffect(() => setApplied(null), [s.run_id])
+  useEffect(() => setApplied(s.applied ? 'applied' : null), [s.run_id, s.applied])
 
   if (!s.run_id) {
     return jsxs('div', {
@@ -121,6 +121,7 @@ function HeatsPane({ ctx }) {
 
   const heats = s.heats || []
   const done = s.phase === 'done'
+  const failed = s.phase === 'error'
   const b = s.baseline
   const apply = async () => {
     setBusy(true)
@@ -154,6 +155,10 @@ function HeatsPane({ ctx }) {
         children: `before: ${b.ok ? 'passing' : 'failing'}${b.passed != null ? ` · ${b.passed}/${(b.passed || 0) + (b.failed || 0)} tests` : ''}`
       }) : null,
       ...heats.map(h => jsx(Lane, { h, isWinner: done && s.winner === h.index }, h.index)),
+      failed ? jsx('div', {
+        className: 'mt-1 text-[0.8125rem]', style: { color: 'var(--ui-danger, #f85149)' },
+        children: 'The run stopped because of an error. Nothing was applied; see the chat for details.'
+      }) : null,
       done ? jsx('div', {
         className: 'mt-1 text-[0.8125rem]',
         children: s.winner
@@ -172,7 +177,7 @@ function HeatsPane({ ctx }) {
 
 function Chip() {
   const s = useSnapshot()
-  if (!s.run_id || s.phase === 'done') return null
+  if (!s.run_id || s.phase === 'done' || s.phase === 'error') return null
   const heats = s.heats || []
   const finished = heats.filter(h => ['pass', 'fail', 'flagged', 'error'].includes(h.status)).length
   const passing = heats.filter(h => h.status === 'pass').length
@@ -191,7 +196,7 @@ export default {
     refresh()
     ctx.onEvent('plugin.heats.run.update', ev => setSnapshot(ev && ev.payload))
     ctx.setInterval(() => {
-      if (!snapshot.run_id || snapshot.phase !== 'done') refresh()
+      if (!snapshot.run_id || (snapshot.phase !== 'done' && snapshot.phase !== 'error')) refresh()
     }, POLL_MS)
     ctx.register({
       id: 'pane',

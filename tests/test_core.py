@@ -76,7 +76,7 @@ def test_patch_roundtrip_and_apply(repo):
     assert sorted(p.files) == ["calc.py", "new.txt"]
     assert p.insertions == 2 and p.deletions == 1
     gitops.remove_worktree(repo, wt, "heats/y/h1")
-    ok, msg = gitops.apply_patch(repo, p.text)
+    ok, msg = gitops.apply_patch(repo, p.data)
     assert ok, msg
     assert "a + b" in Path(repo, "calc.py").read_text()
     assert Path(repo, "new.txt").exists()
@@ -89,16 +89,68 @@ def test_exclude_entry_added_once(repo):
     assert text.count("/.heats/") == 1
 
 
-def test_untracked_files_are_copied(repo):
+def test_untracked_files_are_in_the_base_and_not_in_patches(repo):
     Path(repo, "notes.txt").write_text("untracked\n")
-    files = gitops.untracked_files(repo)
-    assert files == ["notes.txt"]
-    base, _ = gitops.snapshot_base(repo)
+    Path(repo, "tests", "test_local.py").write_text("def test_local():\n    assert True\n")
+    base, dirty = gitops.snapshot_base(repo)
+    assert dirty
     wt = os.path.join(repo, ".heats", "z", "h1")
     gitops.add_worktree(repo, wt, "heats/z/h1", base)
-    assert gitops.copy_untracked(repo, wt, files) == 1
     assert Path(wt, "notes.txt").read_text() == "untracked\n"
+    Path(wt, "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    p = gitops.collect_patch(wt, base)
+    assert p.files == ["calc.py"], p.files  # the user's untracked files are NOT part of the heat's change
     gitops.remove_worktree(repo, wt, "heats/z/h1")
+    ok, msg = gitops.apply_patch(repo, p.data)
+    assert ok, msg
+    st = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True).stdout
+    assert "?? notes.txt" in st and "?? tests/test_local.py" in st  # still untracked, untouched
+
+
+def test_snapshot_never_touches_index_stash_or_refs(repo):
+    Path(repo, "calc.py").write_text("def add(a, b):\n    return a + b  # staged\n")
+    subprocess.run(["git", "add", "calc.py"], cwd=repo, check=True)
+    Path(repo, "calc.py").write_text("def add(a, b):\n    return a + b  # unstaged\n")
+    before = [subprocess.run(c, cwd=repo, capture_output=True, text=True).stdout for c in
+              (["git", "diff", "--cached"], ["git", "stash", "list"], ["git", "for-each-ref"])]
+    gitops.snapshot_base(repo)
+    after = [subprocess.run(c, cwd=repo, capture_output=True, text=True).stdout for c in
+             (["git", "diff", "--cached"], ["git", "stash", "list"], ["git", "for-each-ref"])]
+    assert before == after
+
+
+def test_failed_apply_never_leaves_markers_in_dirty_files(repo):
+    base, _ = gitops.snapshot_base(repo)
+    wt = os.path.join(repo, ".heats", "c", "h1")
+    gitops.add_worktree(repo, wt, "heats/c/h1", base)
+    Path(wt, "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    p = gitops.collect_patch(wt, base)
+    gitops.remove_worktree(repo, wt, "heats/c/h1")
+    Path(repo, "calc.py").write_text("def add(x, y):\n    return x - y  # user's edit\n")
+    ok, msg = gitops.apply_patch(repo, p.data)
+    assert not ok and "uncommitted edits" in msg
+    assert "user's edit" in Path(repo, "calc.py").read_text() and "<<<<<<<" not in Path(repo, "calc.py").read_text()
+
+
+def test_patch_bytes_roundtrip_non_utf8(repo):
+    base, _ = gitops.snapshot_base(repo)
+    wt = os.path.join(repo, ".heats", "b", "h1")
+    gitops.add_worktree(repo, wt, "heats/b/h1", base)
+    Path(wt, "latin1.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+    p = gitops.collect_patch(wt, base)
+    gitops.remove_worktree(repo, wt, "heats/b/h1")
+    ok, msg = gitops.apply_patch(repo, p.data)
+    assert ok, msg
+    assert Path(repo, "latin1.txt").read_bytes() == "caf\xe9\n".encode("latin-1")
+
+
+def test_fingerprint_sees_stash_branch_and_config_changes(repo):
+    f0 = gitops.tree_fingerprint(repo)
+    subprocess.run(["git", "branch", "side"], cwd=repo, check=True)
+    f1 = gitops.tree_fingerprint(repo)
+    subprocess.run(["git", "config", "heats.test", "1"], cwd=repo, check=True)
+    f2 = gitops.tree_fingerprint(repo)
+    assert len({f0, f1, f2}) == 3
 
 
 # ----------------------------------------------------------------- checks
@@ -464,3 +516,88 @@ def test_dependency_dirs_are_linked_not_copied(repo):
     assert p.files == ["calc.py"], p.files
     gitops.remove_worktree(repo, wt, "heats/d/h1")
     assert Path(repo, "node_modules", "left-pad", "index.js").exists()  # removing the heat kept the real folder
+
+
+
+def test_relative_climb_out_is_mapped_back(tmp_path):
+    lane = make_lane(tmp_path)
+    p = map_path("../../../src/x.py", lane)
+    assert p == os.path.join(lane.worktree, "src", "x.py")
+    # another heat's worktree is not reachable either
+    other = os.path.join(lane.root, ".heats", "r1", "h1", "a.py")
+    assert map_path(other, lane) == lane.worktree
+
+
+def test_root_prefix_lookalike_is_not_rewritten(tmp_path):
+    lane = make_lane(tmp_path)
+    sibling = lane.root + "2/x.py"  # /repo2 is not /repo
+    assert map_path(sibling, lane) == sibling
+    new = rewrite("terminal", {"command": f"cat {sibling}"}, lane)
+    assert new["command"] == f"cat {sibling}"
+
+
+@pytest.mark.parametrize("cmd,blocked", [
+    ("git stash pop", "stash"), ("cd x && git stash", "stash"), ("git -C . config user.name x", "config"),
+    ("git branch -D main", "branch"), ("git worktree prune", "worktree"), ("git push origin main", "push"),
+    ("git tag -d v1", "tag"), ("git status", None), ("git diff HEAD", None), ("git add -A && git commit -m x", None),
+    ("git branch", None), ("echo git stash", None), ("pytest -q", None),
+])
+def test_shared_git_commands_detected(cmd, blocked):
+    from heats_core.isolation import shared_git_command
+    got = shared_git_command(cmd)
+    assert (got.lower() if got else None) == blocked
+
+
+def test_worktree_failure_mid_setup_cleans_up(repo, tmp_path, monkeypatch):
+    real_add = gitops.add_worktree
+    calls = {"n": 0}
+
+    def flaky(root, path, branch, base):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise gitops.HeatsGitError("disk full")
+        return real_add(root, path, branch, base)
+
+    monkeypatch.setattr(gitops, "add_worktree", flaky)
+    iso = IsolationMap()
+    with pytest.raises(gitops.HeatsGitError):
+        Runner(FakeLauncher(iso, [good_fix] * 3), iso, tmp_path / "d").run(
+            RunConfig(task="t", n=3, check=CHECK, run_baseline=False), cwd=repo)
+    assert not Path(repo, ".heats").exists()
+    br = subprocess.run(["git", "branch", "--list", "heats/*"], cwd=repo, capture_output=True, text=True).stdout
+    assert br.strip() == ""
+
+
+def test_still_running_child_is_blocked_not_released(repo, tmp_path):
+    class Stubborn(FakeLauncher):
+        def cancel(self, handle, reason):
+            self.cancelled.append(handle["key"])  # ignores the cancel and keeps "running"
+
+    def slow(lane, fl):
+        time.sleep(60)
+
+    iso = IsolationMap()
+    fl = Stubborn(iso, [slow])
+    rep = Runner(fl, iso, tmp_path / "d").run(
+        RunConfig(task="t", n=1, check=CHECK, timeout_s=1, run_baseline=False), cwd=repo)
+    lane = iso.find(rep.run_id and f"heats-{rep.run_id}-h1")
+    assert lane is not None and lane.blocked
+
+
+def test_apply_twice_is_refused(repo, tmp_path):
+    iso = IsolationMap()
+    rep = Runner(FakeLauncher(iso, [good_fix]), iso, tmp_path / "d").run(
+        RunConfig(task="t", n=1, check=CHECK, timeout_s=60, run_baseline=False), cwd=repo)
+    assert apply_heat(tmp_path / "d", rep.run_id)[0]
+    ok, msg = apply_heat(tmp_path / "d", rep.run_id)
+    assert not ok and "already applied" in msg
+
+
+def test_check_output_is_bounded_and_group_killed(tmp_path):
+    marker = tmp_path / "bg_alive"
+    cmd = (f"{PY} -c \"print('x'*5_000_000)\"; "
+           f"(sleep 3; touch {marker}) & exit 0")
+    r = run_check(cmd, str(tmp_path), timeout_s=30, max_output_bytes=100_000)
+    assert r.ok and len(r.tail) <= 2000
+    time.sleep(4)
+    assert not marker.exists()  # the background child was killed with the group
