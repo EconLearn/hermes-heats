@@ -57,6 +57,7 @@ class RunConfig:
     laps: int = 1                 # child launches per heat: a failing heat is relaunched with the check's output
     finish_early: bool = False    # the first heat that qualifies ends the race (others are stopped and judged)
     min_lap_s: float = 90         # do not start a new lap with less time than this left
+    run_id: Optional[str] = None  # preset by the caller (the plugin returns it before the race ends)
 
 
 @dataclass
@@ -176,7 +177,7 @@ class Runner:
                 "could not find a test command for this repo; pass check='<command that exits 0 on success>'")
         base, dirty = gitops.snapshot_base(root)
         fingerprint = gitops.tree_fingerprint(root)
-        run_id = new_run_id()
+        run_id = cfg.run_id or new_run_id()
         run_dir = self.data_dir / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         gitops.ensure_excluded(root)

@@ -13,7 +13,9 @@ local model, a flaky area, a fix you got wrong once already).
    If none exists, ask the user, or write the failing test first in the main checkout and commit it.
 2. Write `task` so it stands alone: the attempts see nothing else from this chat. Include file names,
    the error message and what "done" means.
-3. Call `heats_run(task=..., n=3, check="<command>")`. It blocks until every attempt is judged.
+3. Call `heats_run(task=..., n=3, check="<command>")`. It waits up to ~6 minutes. If it returns
+   `"status": "running"`, call `heats_wait(run_id=...)` and repeat until `"status": "done"`. Do not edit
+   the repository yourself while a race runs.
 4. Show the user the `scoreboard` as returned. Mention the winner's diff size and anything flagged
    (protected files edited, attempts that tried to write into the main checkout).
 5. Apply only when the user agrees: `heats_apply(run_id=..., [heat=N])`. The patch lands unstaged, so

@@ -1,5 +1,5 @@
 name: heats
-version: "0.2.0"
+version: "0.2.1"
 manifest_version: 2
 api_version: 1
 description: "Race N attempts at a coding task in parallel git worktrees; the repo's own tests pick the winner, which you apply with one call."
@@ -9,6 +9,7 @@ requires_hermes: ">=0.23.0"
 tags: [coding, git, worktrees, subagents, testing, best-of-n]
 provides_tools:
   - heats_run
+  - heats_wait
   - heats_apply
 provides_hooks:
   - pre_tool_call
@@ -26,4 +27,5 @@ config_schema:
   protected_paths: {type: list, default: [], label: "Other protected paths", description: "Files or folders an attempt may not change if it is to win."}
   laps: {type: int, default: 3, label: "Laps per attempt", description: "If an attempt finishes but the check still fails, Heats restarts it in the same worktree with the real test output (up to this many times in total)."}
   finish_early: {type: bool, default: true, label: "Finish at the first pass", description: "The first attempt that passes cleanly ends the race; the others are stopped and judged as they stand."}
+  wait_seconds: {type: int, default: 360, label: "Wait per tool call (s)", description: "How long heats_run / heats_wait block before returning a progress update. Keep it below Hermes's tool deadline (tools.sequential_call, 420 s by default)."}
   run_baseline: {type: bool, default: true, label: "Run the check before", description: "Run the check once on the starting code so the scoreboard shows before and after."}

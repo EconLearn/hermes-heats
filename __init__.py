@@ -8,15 +8,18 @@ terminal directory, plus tools, a slash command, a CLI command and a bundled ski
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 from .heats_core import gitops
 from .heats_core.isolation import IsolationMap, note_terminal_result, rewrite, shared_git_command
-from .heats_core.runner import MAX_HEATS, RunConfig, Runner, apply_heat, list_runs, load_report
+from .heats_core.runner import MAX_HEATS, RunConfig, Runner, apply_heat, list_runs, load_report, new_run_id
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,11 @@ PLUGIN = "heats"
 _ISOLATION = IsolationMap()
 _CTX: Any = None
 _WRITE_TOOLS = {"write_file", "patch"}
+# Hermes stops waiting for any one tool call after 420 s (tools.sequential_call) and plugins cannot raise
+# that per tool, so a race runs in a background thread and the tools wait for it in slices below that.
+DEFAULT_WAIT_S = 360
+_RUNS: dict[str, dict] = {}
+_RUNS_LOCK = threading.Lock()
 
 
 # ------------------------------------------------------------------ helpers
@@ -122,7 +130,8 @@ HEATS_RUN = {
         "then run the repository's check command (its tests) in every worktree and rank the attempts. "
         "Nothing in the user's checkout changes; the winner is applied afterwards with heats_apply. "
         "Use it when the user asks for heats / best-of-N / several attempts, or for a bug fix or small "
-        "feature that has a test command which decides success. Takes minutes; blocks until done. "
+        "feature that has a test command which decides success. Takes minutes: it waits up to ~6 minutes and "
+        "returns the scoreboard, or a run_id to pass to heats_wait if the race is still going. "
         "Do not use it for tasks without an objective check."
     ),
     "parameters": {
@@ -137,6 +146,20 @@ HEATS_RUN = {
             "repo_path": {"type": "string", "description": "Repository to work on (default: the session's working directory)."},
         },
         "required": ["task"],
+    },
+}
+
+HEATS_WAIT = {
+    "name": "heats_wait",
+    "description": (
+        "Wait for a Heats race that heats_run reported as still running, then return its scoreboard. "
+        "Waits up to ~6 minutes per call; if it is still running, call heats_wait again with the same run_id. "
+        "Do not edit the repository yourself while a race is running."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"run_id": {"type": "string", "description": "run_id from heats_run."}},
+        "required": ["run_id"],
     },
 }
 
@@ -200,24 +223,87 @@ def _handle_run(args: dict, **kwargs) -> str:
         return _err(f"{cwd} is not inside a git repository; Heats needs git worktrees (run `git init` and commit once)")
     if getattr(_CTX, "subagent_lifecycle", None) is None:
         return _err("this Hermes has no subagent lifecycle API; update Hermes to use Heats")
+    run_id = new_run_id()
+    cfg.run_id = run_id
+    runner = Runner(LifecycleLauncher(_CTX, toolsets), _ISOLATION, _data_dir(),
+                    progress=lambda m: logger.info(m), on_update=_publish)
+    entry = {"runner": runner, "report": None, "error": None, "done": threading.Event()}
+
+    def race() -> None:
+        try:
+            entry["report"] = runner.run(cfg, cwd=cwd)
+        except gitops.HeatsGitError as exc:
+            entry["error"] = str(exc)
+        except Exception as exc:  # never crash the agent turn
+            logger.exception("heats_run failed")
+            entry["error"] = f"heats_run failed: {type(exc).__name__}: {exc}"
+        finally:
+            entry["done"].set()
+
+    with _RUNS_LOCK:
+        _RUNS[run_id] = entry
+    # copy the context: the subagent lifecycle finds the parent session through context variables
+    threading.Thread(target=contextvars.copy_context().run, args=(race,), name=f"heats-{run_id}",
+                     daemon=True).start()
+    return _wait_for(run_id, _wait_budget())
+
+
+def _wait_budget() -> float:
     try:
-        runner = Runner(LifecycleLauncher(_CTX, toolsets), _ISOLATION, _data_dir(),
-                        progress=lambda m: logger.info(m), on_update=_publish)
-        report = runner.run(cfg, cwd=cwd)
-    except gitops.HeatsGitError as exc:
-        return _err(str(exc))
-    except Exception as exc:  # never crash the agent turn
-        logger.exception("heats_run failed")
-        return _err(f"heats_run failed: {type(exc).__name__}: {exc}")
-    w = report.winner
+        return max(5.0, min(3600.0, float(_setting("wait_seconds", DEFAULT_WAIT_S))))
+    except (TypeError, ValueError):
+        return float(DEFAULT_WAIT_S)
+
+
+def _final_payload(rep: dict) -> str:
+    w = rep.get("winner")
+    md = ""
+    try:
+        md = (Path(rep["run_dir"]) / "scoreboard.md").read_text(encoding="utf-8")
+    except (OSError, KeyError):
+        pass
     return json.dumps({
-        "ok": True, "run_id": report.run_id, "winner": w.index if w else None,
-        "scoreboard": report.markdown(),
-        "heats": [{"heat": h.index, "check_passed": bool(h.check and h.check.ok), "qualifies": h.qualifies,
-                   "files": h.files, "agent_summary": h.agent_summary[:300]} for h in report.heats],
+        "ok": True, "status": "done", "run_id": rep["run_id"], "winner": w, "scoreboard": md,
+        "heats": [{"heat": h["index"], "check_passed": bool(h.get("check") and h["check"].get("ok")),
+                   "qualifies": h.get("qualifies"), "files": h.get("files"),
+                   "agent_summary": (h.get("agent_summary") or "")[:300]} for h in rep.get("heats", [])],
         "next": ("Show the user the scoreboard, then offer heats_apply for the winner." if w else
                  "Show the user the scoreboard; no attempt passed cleanly."),
     })
+
+
+def _wait_for(run_id: str, budget_s: float) -> str:
+    with _RUNS_LOCK:
+        entry = _RUNS.get(run_id)
+    if entry is None:
+        try:
+            return _final_payload(load_report(_data_dir(), run_id))
+        except FileNotFoundError:
+            return _err(f"no Heats run '{run_id}'")
+    entry["done"].wait(timeout=budget_s)
+    if entry["done"].is_set():
+        if entry["error"]:
+            return _err(entry["error"])
+        return _final_payload(entry["report"].to_dict())
+    live = dict(getattr(entry["runner"], "_live", {}) or {})
+    rows = live.get("heats") or []
+    judged = sum(1 for r in rows if r.get("status") in ("pass", "fail", "flagged", "error"))
+    passing = sum(1 for r in rows if r.get("status") == "pass")
+    laps = max([r.get("lap") or 1 for r in rows] or [1])
+    elapsed = int(time.time() - (live.get("started_at") or time.time()))
+    return json.dumps({
+        "ok": True, "status": "running", "run_id": run_id, "elapsed_s": elapsed,
+        "progress": f"{len(rows)} attempts, {judged} judged, {passing} passing, up to lap {laps}",
+        "next": (f"The race is still running. Call heats_wait with run_id '{run_id}' now to keep waiting. "
+                 "Do not edit the repository yourself meanwhile."),
+    })
+
+
+def _handle_wait(args: dict, **kwargs) -> str:
+    run_id = (args.get("run_id") or "").strip()
+    if not run_id:
+        return _err("run_id is required")
+    return _wait_for(run_id, _wait_budget())
 
 
 def _handle_apply(args: dict, **kwargs) -> str:
@@ -365,6 +451,7 @@ def register(ctx) -> None:
     global _CTX
     _CTX = ctx
     ctx.register_tool(name="heats_run", toolset="heats", schema=HEATS_RUN, handler=_handle_run, emoji="🏁")
+    ctx.register_tool(name="heats_wait", toolset="heats", schema=HEATS_WAIT, handler=_handle_wait, emoji="🏁")
     ctx.register_tool(name="heats_apply", toolset="heats", schema=HEATS_APPLY, handler=_handle_apply, emoji="🏁")
     ctx.register_middleware("tool_request", _mw_tool_request)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)

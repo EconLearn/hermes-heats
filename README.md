@@ -78,6 +78,7 @@ Ask the agent in plain words: *"use heats (3 attempts) to fix the failing parser
 | Tool | What it does |
 |---|---|
 | `heats_run(task, n=3, check=?, models=?, timeout_minutes=?, laps=?, repo_path=?)` | Runs the race and returns the scoreboard. `check` is auto-detected (pytest, npm/pnpm/yarn test, cargo test, go test, make test) when omitted. |
+| `heats_wait(run_id)` | A race longer than ~6 minutes keeps running in the background; `heats_run` returns its `run_id` and progress, and the agent calls `heats_wait` until it is done. (Hermes stops waiting for any single tool call after 420 s.) |
 | `heats_apply(run_id, heat=?, force=?)` | Applies the winner's (or a named heat's) patch to your working tree, unstaged. |
 
 Without the agent:
@@ -104,6 +105,7 @@ hermes heats list|show|apply ... # same from the shell
 | `protected_paths` | [] | More files or folders an attempt may not change |
 | `laps` | 3 | Launches per attempt; a failing attempt is restarted with the measured check output |
 | `finish_early` | true | The first attempt that passes cleanly ends the race |
+| `wait_seconds` | 360 | How long one `heats_run` / `heats_wait` call blocks before returning progress (keep below Hermes's 420 s tool deadline) |
 | `run_baseline` | true | Run the check on the starting code too, for a before/after |
 
 ## What it does on your machine (disclosure)

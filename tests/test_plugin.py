@@ -126,3 +126,66 @@ def test_slash_command_lists_and_shows_saved_run(plugin):
     assert plugin._cmd("show r1") == "SCOREBOARD"
     shown = plugin._cmd("show r1 1")
     assert "diff --git" in shown and "1 passed" in shown
+
+
+def _git_repo(path):
+    import subprocess
+    path.mkdir()
+    subprocess.run("git init -q && echo x > a.txt && git add -A && "
+                   "git -c user.name=t -c user.email=t@t commit -qm init", shell=True, cwd=path, check=True)
+    return path
+
+
+def test_long_race_returns_run_id_then_heats_wait_finishes(plugin, tmp_path, monkeypatch):
+    import contextvars
+    import threading
+    import time as _t
+    marker = contextvars.ContextVar("parent_session", default=None)
+    seen = {}
+
+    class SlowRunner:
+        def __init__(self, *a, **kw):
+            self._live = {"heats": [{"status": "running", "lap": 2}], "started_at": _t.time()}
+
+        def run(self, cfg, cwd):
+            seen["ctx"] = marker.get()          # the race thread must see the caller's context
+            seen["run_id"] = cfg.run_id
+            _t.sleep(1.5)
+            run_dir = tmp_path / "rd"
+            run_dir.mkdir()
+            (run_dir / "scoreboard.md").write_text("SCOREBOARD")
+
+            class Rep:
+                def to_dict(self):
+                    return {"run_id": cfg.run_id, "winner": 1, "run_dir": str(run_dir),
+                            "heats": [{"index": 1, "check": {"ok": True}, "qualifies": True, "files": ["a.txt"]}]}
+            return Rep()
+
+    ctx = FakeCtx()
+    ctx.subagent_lifecycle = object()
+    ctx.config["wait_seconds"] = 5
+    plugin.register(ctx)
+    monkeypatch.setattr(plugin, "Runner", SlowRunner)
+    monkeypatch.setattr(plugin, "_wait_budget", lambda: 0.2)
+    repo = _git_repo(tmp_path / "repo")
+    marker.set("parent-1")
+    first = json.loads(plugin._handle_run({"task": "x", "repo_path": str(repo), "check": "true"}))
+    assert first["status"] == "running" and first["run_id"] == seen["run_id"]
+    assert "heats_wait" in first["next"] and "lap 2" in first["progress"]
+    assert seen["ctx"] == "parent-1"
+    monkeypatch.setattr(plugin, "_wait_budget", lambda: 10)
+    done = json.loads(plugin._handle_wait({"run_id": first["run_id"]}))
+    assert done["status"] == "done" and done["winner"] == 1 and done["scoreboard"] == "SCOREBOARD"
+    assert json.loads(plugin._handle_wait({"run_id": "nope"}))["ok"] is False
+    assert "run_id is required" in plugin._handle_wait({})
+
+
+def test_heats_wait_reads_a_finished_run_from_disk(plugin, tmp_path):
+    plugin.register(FakeCtx())
+    d = plugin._data_dir() / "runs" / "0101-000000-abcd"
+    d.mkdir(parents=True)
+    (d / "scoreboard.md").write_text("OLD")
+    (d / "report.json").write_text(json.dumps({"run_id": "0101-000000-abcd", "winner": None, "run_dir": str(d),
+                                               "heats": []}))
+    out = json.loads(plugin._handle_wait({"run_id": "0101-000000-abcd"}))
+    assert out["status"] == "done" and out["scoreboard"] == "OLD" and out["winner"] is None
