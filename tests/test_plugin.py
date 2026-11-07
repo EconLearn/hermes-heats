@@ -189,3 +189,14 @@ def test_heats_wait_reads_a_finished_run_from_disk(plugin, tmp_path):
                                                "heats": []}))
     out = json.loads(plugin._handle_wait({"run_id": "0101-000000-abcd"}))
     assert out["status"] == "done" and out["scoreboard"] == "OLD" and out["winner"] is None
+
+
+def test_misrouted_heats_call_gets_a_how_to_message(plugin):
+    r = plugin._on_pre_tool_call(tool_name="execute_code", args={"code": "res = heats_run(task='fix', n=3)\nprint(res)"}, task_id="p")
+    assert r and r["action"] == "block" and "tool_call" in r["message"] and "heats_run" in r["message"]
+    r = plugin._on_pre_tool_call(tool_name="terminal", args={"command": "cd /x && heats_wait --run_id 1"}, task_id="p")
+    assert r and "heats_wait" in r["message"]
+    # mentions that are not calls stay allowed
+    assert plugin._on_pre_tool_call(tool_name="terminal", args={"command": "grep -rn heats_run ."}, task_id="p") is None
+    assert plugin._on_pre_tool_call(tool_name="execute_code", args={"code": "print('heats_run')"}, task_id="p") is None
+    assert plugin._on_pre_tool_call(tool_name="read_file", args={"path": "heats_run("}, task_id="p") is None

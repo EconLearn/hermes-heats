@@ -12,6 +12,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -352,10 +353,37 @@ def _mw_tool_request(tool_name: str = "", args: Optional[dict] = None, **kwargs)
     return {"args": new, "source": PLUGIN, "reason": f"keep heat {lane.heat} inside its worktree"}
 
 
+_OUR_TOOLS = ("heats_run", "heats_wait", "heats_apply")
+_CODE_ARG_KEYS = ("code", "command", "script", "source")
+_CALL_IN_CODE = re.compile(r"\b(heats_run|heats_wait|heats_apply)\s*\(")
+_CALL_IN_SHELL = re.compile(r"(?:^|[;&|(]\s*|\n\s*)(heats_run|heats_wait|heats_apply)\b")
+
+
+def _misrouted_call(tool_name: str, args: Optional[dict]) -> Optional[str]:
+    """Small models that met heats_run through tool_search sometimes try to "call" it from
+    execute_code or the shell, which Hermes blocks (measured: 7 of 20 bench runs, 4B model).
+    Name the mistake and the right call instead of letting the turn end in a refusal."""
+    if tool_name not in ("execute_code", "terminal") or not isinstance(args, dict):
+        return None
+    text = " ".join(str(args.get(k) or "") for k in _CODE_ARG_KEYS)
+    # only an attempted call: `heats_run(...)` in code, or `heats_run ...` as a shell command;
+    # `grep heats_run` and the like stay allowed
+    pat = _CALL_IN_CODE if tool_name == "execute_code" else _CALL_IN_SHELL
+    m = pat.search(text)
+    if not m:
+        return None
+    hit = m.group(1)
+    return (f"Heats: `{hit}` is a Hermes tool, not a Python function or shell command, so it cannot run "
+            f"inside {tool_name}. Call it as a tool: if it was found with tool_search, use "
+            f'tool_call with calls=[{{"name": "{hit}", "arguments": {{...}}}}] (the arguments tool_describe '
+            f"listed); otherwise call {hit} directly.")
+
+
 def _on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, **kwargs):
     lane = _lane_for(kwargs)
     if lane is None:
-        return None
+        msg = _misrouted_call(tool_name, args)
+        return {"action": "block", "message": msg} if msg else None
     if lane.blocked:
         return {"action": "block", "message": f"Heats: the run for attempt {lane.heat} has ended; stop now."}
     if tool_name == "terminal":

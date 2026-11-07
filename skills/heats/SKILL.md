@@ -21,5 +21,8 @@ local model, a flaky area, a fix you got wrong once already).
 5. Apply only when the user agrees: `heats_apply(run_id=..., [heat=N])`. The patch lands unstaged, so
    the user reviews it with `git diff` like any other change.
 
+`heats_run`, `heats_wait` and `heats_apply` are tools. If you found them with `tool_search`, invoke them with
+`tool_call` (calls=[{"name": "heats_run", "arguments": {...}}]); never from Python code or the shell.
+
 Do not use Heats without a check command: with no objective judge it is just N guesses.
 `/heats list`, `/heats show <run_id> [heat]` and `/heats apply <run_id> [heat]` work without the agent.
