@@ -646,14 +646,14 @@ def test_no_new_lap_without_enough_time(repo, tmp_path):
 
 def test_finish_early_stops_the_others(repo, tmp_path):
     def slow(lane, fl):
-        time.sleep(90)
+        time.sleep(600)
 
     iso = IsolationMap()
     fl = FakeLauncher(iso, [slow, good_fix])
-    t = time.monotonic()
-    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=2, check=CHECK, timeout_s=120,
+    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=2, check=CHECK, timeout_s=500,
                                                         finish_early=True, laps=3, min_lap_s=0), cwd=repo)
-    assert time.monotonic() - t < 60
+    # heat 1 is STOPPED (ended by heat 2's pass), not TIMEOUT: the race finished early. No wall-clock
+    # assert: on a loaded machine one pytest run inside this test took ~50 s (measured 9 Nov).
     assert rep.winner is not None and rep.winner.index == 2
     by = {h.index: h for h in rep.heats}
     assert by[1].agent_state == "STOPPED" and any(k.endswith("h1") for k in fl.cancelled)
@@ -686,11 +686,11 @@ def test_new_lap_clears_previous_lap_text(repo, tmp_path):
         if len(fl.goals[1]) == 1:
             wrong_fix(lane, fl)
         else:
-            time.sleep(90)
+            time.sleep(900)
 
     iso = IsolationMap()
     fl = FakeLauncher(iso, [learns])
-    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check=CHECK, timeout_s=20, laps=2,
+    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check=CHECK, timeout_s=90, laps=2,
                                                         min_lap_s=0), cwd=repo)
     h = rep.heats[0]
     assert h.laps == 2 and h.agent_state == "TIMEOUT" and h.agent_summary == ""

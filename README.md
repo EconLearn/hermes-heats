@@ -28,7 +28,8 @@ Winner: heat 2. Nothing in your repo has changed yet.
 **1. The referee (on by default, no setup).** Hermes fires a `pre_verify` hook when the agent has edited files
 in this turn and is about to finish. Heats then runs your check command in your checkout. If the check fails,
 the agent is sent back with the exit code, the pass/fail counts and the tail of the test output. The message goes
-to the agent only: Hermes keeps it out of the chat history, so what you see is the agent carrying on. Each
+to the agent only: Hermes keeps it out of the chat history, so in the chat you see the agent carrying on; the
+Desktop pane's Referee card shows each verdict (tests red, sent back 1/3; tests green). Each
 referee call is logged to `referee.jsonl` (see Disclosure). Hermes allows at most 3 of these per turn
 (`agent.max_verify_nudges`). On the last one, the agent is told to say plainly that
 the check still fails and to offer a race. If the check passes, or cannot start at all, the referee stays quiet.
