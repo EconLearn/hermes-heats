@@ -7,10 +7,11 @@ Pure logic here; the ``pre_verify`` hook in the plugin's __init__ wires it up.""
 from __future__ import annotations
 
 import os
+import re
 from typing import Callable, Optional
 
 from . import gitops
-from .checks import _TEST_CONFIG_FILE, CheckResult, detect_check, is_test_path, run_check
+from .checks import _TEST_CONFIG_FILE, CheckResult, cannot_run, detect_check, is_test_path, run_check
 
 TAIL_CHARS = 1_500
 CANNOT_RUN = (126, 127)  # shell: not executable / command not found
@@ -22,7 +23,7 @@ def _is_pytest(cmd: str) -> bool:
 # run the check: that would execute a command the agent just wrote, without the user's approval.
 _DEFINES_CHECK = {"package.json", "Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", "pyproject.toml",
                   "setup.cfg", "setup.py", "conftest.py", "tox.ini", "noxfile.py", "Cargo.toml", "go.mod",
-                  "Rakefile", "build.gradle", "build.gradle.kts", "pom.xml"}
+                  "Rakefile", "build.gradle", "build.gradle.kts", "pom.xml", "build.rs", "config.toml"}
 
 
 def _defines_check(rel: str) -> bool:
@@ -63,7 +64,8 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
     if not cmd:
         return None
     rel = sorted({os.path.relpath(os.path.realpath(p), root) for p in changed_paths if isinstance(p, str)})
-    risky = [p for p in rel if _defines_check(p)]
+    named = {os.path.basename(w) for w in re.split(r"[\s;&|()<>'\"]+", cmd) if w}  # scripts the check runs
+    risky = [p for p in rel if _defines_check(p) or os.path.basename(p) in named]
     if risky:
         info.update(ran=True, repo=os.path.basename(root), check=cmd, ok=None, exit_code=None,
                     skipped=f"{', '.join(risky[:3])} edited (it can change what the check runs)")
@@ -78,7 +80,7 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
     if res.timed_out:
         info["skipped"] = f"check took longer than {timeout_s:.0f} s"
         return None
-    if res.exit_code is None or res.exit_code in CANNOT_RUN or (_is_pytest(cmd) and res.exit_code in (4, 5)):
+    if cannot_run(res, cmd):
         info["skipped"] = f"check could not run (exit {res.exit_code})"
         return None
     touched_tests = [p for p in rel if is_test_path(p)]

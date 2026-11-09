@@ -223,7 +223,8 @@ def _handle_run(args: dict, **kwargs) -> str:
     toolsets = tuple(_setting("toolsets", ["terminal", "file"]) or ()) or None
     cfg = RunConfig(
         task=task, n=n, check=args.get("check") or _setting("check", "") or None, models=models,
-        timeout_s=min(max(30.0, timeout_min * 60), 4 * 3600.0),  # at most 4 h: a forgotten race must end check_timeout_s=float(_setting("check_timeout_seconds", 600)),
+        timeout_s=min(max(30.0, timeout_min * 60), 4 * 3600.0),  # at most 4 h: a forgotten race must end
+        check_timeout_s=float(_setting("check_timeout_seconds", 600)),
         protect_tests=bool(_setting("protect_tests", True)),
         protected_paths=list(_setting("protected_paths", []) or []),
         run_baseline=bool(_setting("run_baseline", True)),

@@ -485,8 +485,20 @@ def git_guard(command: Any, cwd: Optional[str] = None, _depth: int = 0) -> Optio
         j = _cmd_index(seg)
         if j < len(seg) and "$" in seg[j]:
             # the command word is a variable ($G, ${G}, $(...)): it may be git; judge its words conservatively
-            words = {w.lower() for w in seg[j + 1:]}
-            hit_word = next((w for w in _GIT_WORDS if w in words), None)
+            # only the word in git's subcommand position counts (`$G -C d stash` -> stash; `$PY -m pytest -k branch`
+            # -> pytest, allowed): skip options, and the values of git's -C/-c/--git-dir/--work-tree
+            sub, k, rest = None, j + 1, seg[j + 1:]
+            while k < len(seg):
+                w = seg[k]
+                if w in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+                    k += 2
+                    continue
+                if w.startswith("-"):
+                    k += 1
+                    continue
+                sub = w.lower()
+                break
+            hit_word = sub if sub in _GIT_WORDS else None
             if hit_word:
                 return hit_word, (f"the command word `{seg[j]}` is a variable and `{hit_word}` would change state "
                                   "shared with the user's checkout if it is git; spell `git` out")

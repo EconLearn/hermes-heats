@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
 from . import gitops
-from .checks import CheckResult, Guard, detect_check, run_check
+from .checks import cannot_run, CheckResult, Guard, detect_check, run_check
 from .isolation import IsolationMap, Lane
 from .scoring import HeatResult, rank, scoreboard, winner
 
@@ -232,7 +232,7 @@ class Runner:
             if cfg.run_baseline:  # measured before any attempt starts: a check that cannot run stops the race here
                 baseline = self._baseline(root, base, run_id, check, cfg)
                 self._live["baseline"] = {"ok": baseline.ok, "passed": baseline.passed, "failed": baseline.failed}
-                if baseline.exit_code in CANNOT_RUN_EXIT_CODES or (baseline.exit_code is None and not baseline.timed_out):
+                if cannot_run(baseline, check):
                     raise RuntimeError(f"the check command could not run (exit {baseline.exit_code}): `{check}`. "
                                        f"Output: {(baseline.error or baseline.tail)[-300:].strip()} -- fix the command and try again")
                 if baseline.ok:
@@ -268,6 +268,7 @@ class Runner:
             laps_used = {i: 1 for i in handles}
             deadline = time.monotonic() + cfg.timeout_s
             pending = set(handles)
+            unknown_since: dict[int, float] = {}
             stop_noted = False
             race_won = False
 
@@ -300,9 +301,19 @@ class Runner:
                     break
                 for i in list(pending):
                     state = self.launcher.state(handles[i], wait_s=1.0 / max(1, len(pending)))
+                    if state == "UNKNOWN":
+                        # Hermes can report UNKNOWN for a child that is still alive (e.g. its session id rotated
+                        # during context compression). Only believe it after 60 s, and even then do not count
+                        # the child as finished: its tool calls stay blocked rather than un-isolated.
+                        first = unknown_since.setdefault(i, time.monotonic())
+                        if time.monotonic() - first < 60:
+                            continue
+                    else:
+                        unknown_since.pop(i, None)
                     if state in TERMINAL_STATES:
                         pending.discard(i)
-                        finished_children.add(i)
+                        if state != "UNKNOWN":
+                            finished_children.add(i)
                         h = heats[i - 1]
                         h.duration_s = round(time.monotonic() - t0[i], 1)
                         res = self.launcher.result(handles[i]) or {}
@@ -351,8 +362,10 @@ class Runner:
             for i in sorted(set(handles) - finished_children):
                 while time.monotonic() < grace:
                     try:
-                        if self.launcher.state(handles[i], wait_s=0.5) in TERMINAL_STATES:
-                            finished_children.add(i)
+                        st = self.launcher.state(handles[i], wait_s=0.5)
+                        if st in TERMINAL_STATES:
+                            if st != "UNKNOWN":  # unknown = maybe still alive: keep its calls blocked
+                                finished_children.add(i)
                             break
                     except Exception:
                         break

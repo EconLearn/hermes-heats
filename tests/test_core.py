@@ -761,3 +761,23 @@ def test_goal_runs_check_first_and_context_carries_the_brief(repo, tmp_path):
     assert g.index("run the check") < g.index("fix it") and "patch tool" in g and "attempt 1 of 1" not in g
     assert "Finish with one sentence" not in g
     assert contexts and contexts[0].endswith("BRIEF: be a careful coder")
+
+
+def test_unknown_child_state_is_not_trusted_as_finished(repo, tmp_path):
+    class Flaky(FakeLauncher):
+        def state(self, handle, wait_s):
+            st = super().state(handle, wait_s)
+            return "UNKNOWN" if st == "RUNNING" and handle["heat"] == 1 else st
+
+    def slow(lane, fl):
+        time.sleep(5)
+
+    iso = IsolationMap()
+    fl = Flaky(iso, [slow, good_fix])
+    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=2, check=CHECK, timeout_s=300,
+                                                        finish_early=True, min_lap_s=0), cwd=repo)
+    by = {h.index: h for h in rep.heats}
+    # heat 1 reported UNKNOWN while it was running: it must not have been judged as finished early;
+    # heat 2's pass ends the race and heat 1 is stopped
+    assert rep.winner is not None and rep.winner.index == 2
+    assert by[1].agent_state in ("STOPPED", "SUCCEEDED")

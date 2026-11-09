@@ -127,3 +127,22 @@ def test_does_not_run_a_check_the_agent_may_have_just_redefined(tmp_path):
                               info=info) is None
         assert info["ran"] and "can change what the check runs" in info["skipped"], f
     assert calls == []
+
+
+def test_missing_test_runner_is_not_blamed_on_the_agent(tmp_path):
+    r = _repo(tmp_path)
+    def run(c, cwd, timeout_s=0):
+        return CheckResult(c, 1, 0.1, tail="/usr/bin/python3: No module named pytest\n")
+    info: dict = {}
+    assert referee.review([str(r / "m.py")], 0, 3, check="python3 -m pytest -q", runner=run, info=info) is None
+    assert "could not run" in info["skipped"]
+
+
+def test_edited_script_named_in_the_check_is_not_run(tmp_path):
+    r = _repo(tmp_path)
+    calls: list = []
+    info: dict = {}
+    assert referee.review([str(r / "run_tests.sh")], 0, 3, check="./run_tests.sh -q", runner=_fake(False, calls), info=info) is None
+    assert calls == [] and "run_tests.sh" in info["skipped"]
+    # an unrelated short file name inside a word of the command does not count
+    assert referee.review([str(r / "q")], 0, 3, check="pytest -q", runner=_fake(False, calls)) is not None

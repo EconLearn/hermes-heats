@@ -245,6 +245,22 @@ _TEST_PATH = re.compile(
 )
 
 
+_NO_RUNNER = re.compile(r"No module named '?(pytest|py\.test|unittest2|nose)'?|command not found|: not found\b|"
+                        r"is not recognized as an internal or external command|ModuleNotFoundError: No module named '?pytest")
+
+
+def cannot_run(res: "CheckResult", command: str = "") -> bool:
+    """True when the check never really ran (missing command or test runner, usage error): no one's code was
+    judged, so neither an agent nor an attempt should be blamed for it."""
+    if res.timed_out:
+        return False
+    if res.exit_code is None or res.exit_code in (126, 127):
+        return True
+    if "pytest" in (command or res.command or "") and res.exit_code in (4, 5):
+        return True  # pytest: usage error / no tests collected
+    return bool(res.exit_code and _NO_RUNNER.search((res.tail or "")[-4000:]))
+
+
 def is_test_path(path: str) -> bool:
     return bool(_TEST_PATH.search(path.replace("\\", "/")))
 

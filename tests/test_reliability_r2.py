@@ -96,6 +96,7 @@ def test_git_guard_quoting_and_variable_bypasses(cmd):
     assert shared_git_command(cmd) is not None
 
 
-@pytest.mark.parametrize("cmd", ["echo $HOME", "$PY -m pytest -q", "\"$VENV/bin/python\" -m pytest", "git status"])
+@pytest.mark.parametrize("cmd", ["echo $HOME", "$PY -m pytest -q", "\"$VENV/bin/python\" -m pytest", "git status",
+                                 "$PY -m pytest -k branch", "$PY -m pytest tests -k \"stash or config\""])
 def test_git_guard_variable_commands_still_allowed(cmd):
     assert shared_git_command(cmd) is None
