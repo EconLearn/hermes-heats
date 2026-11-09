@@ -13,13 +13,13 @@ you> use heats (3) to fix the failing date tests, check is `pytest -q tests/test
 🏁 heats_run ...
 
 Heats 1106-153012-a1f2: 3 heats, check `pytest -q tests/test_dates.py`, base 4c1e9a20 + your uncommitted changes
-Before: FAIL (1), tests 2/4
+Before: FAIL (exit 1), tests 2/4
 
 | Rank  | Heat | Model    | Strategy   | Check    | Tests | Diff            | Time  | Notes                                 |
 |-------|------|----------|------------|----------|-------|-----------------|-------|---------------------------------------|
-| WIN 1 | 2    | default  | root-cause | PASS     | 4/4   | +4 -2 (1 files) | 1m12s |                                       |
-| 2     | 3    | default  | test-first | PASS     | 4/4   | +9 -1 (2 files) | 1m40s | edited protected files: tests/test_dates.py |
-| 3     | 1    | default  | minimal    | FAIL (1) | 3/4   | +1 -1 (1 files) | 0m48s |                                       |
+| WIN 1 | 2    | default  | root-cause | PASS     | 4/4   | +4 -2 (1 file)  | 1m12s |                                       |
+| 2     | 3    | default  | minimal    | PASS     | 4/4   | +9 -1 (2 files) | 1m40s | edited protected files: tests/test_dates.py |
+| 3     | 1    | default  | standard   | FAIL (exit 1) | 3/4 | +1 -1 (1 file)  | 0m48s |                                       |
 
 Winner: heat 2. Nothing in your repo has changed yet.
 
@@ -43,7 +43,7 @@ you> apply it
   ends the race and the others are stopped, so you do not wait for the slowest one.
 - **An objective judge.** Every attempt is scored by running your check command in its worktree. Ranking:
   passes the check → more tests passing → smaller diff → faster.
-- **Cheating cannot win.** An attempt that edits test files (or any path you protect) is flagged and
+- **Editing the tests cannot win.** An attempt that edits test files (or any path you protect) is flagged and
   cannot be the winner, even if the check passes.
 - **Nothing is lost or left behind.** Worktrees and branches are removed at the end; every attempt's
   patch is saved. Heats fingerprints your checkout (files, branches, stash, git config) before and
@@ -54,7 +54,7 @@ you> apply it
 - **Safe apply.** The winner lands as an ordinary unstaged edit. If your files changed since the run
   and the patch no longer applies cleanly, Heats refuses rather than mixing conflict markers into
   uncommitted work. Applying the same run twice is refused.
-- **Diversity built in.** Attempts get different approaches (minimal fix, root cause, test-first,
+- **Diversity built in.** Attempts get different approaches (standard, root cause, minimal fix,
   fresh eyes) and can race different models (`models: [qwen3:4b, your-cloud-model]`).
 
 ## Measured
@@ -97,7 +97,7 @@ hermes heats list|show|apply ... # same from the shell
 | Key | Default | Meaning |
 |---|---|---|
 | `default_heats` | 3 | Attempts per run (1-8) |
-| `timeout_minutes` | 15 | Unfinished attempts are stopped and judged as they stand |
+| `timeout_minutes` | 20 | Unfinished attempts are stopped and judged as they stand |
 | `check` | auto | Command that exits 0 on success |
 | `models` | [] | Models to race; attempts cycle through them |
 | `toolsets` | [terminal, file] | What each attempt may use (never broader than the parent) |

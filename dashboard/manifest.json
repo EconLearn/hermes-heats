@@ -2,6 +2,6 @@
   "name": "heats",
   "label": "Heats",
   "description": "Backend routes for the Heats Desktop pane: the live run, recent runs, apply a heat.",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "api": "plugin_api.py"
 }

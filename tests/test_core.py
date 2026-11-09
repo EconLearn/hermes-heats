@@ -177,7 +177,7 @@ def test_detect_check(tmp_path):
     assert detect_check(str(tmp_path)) == "pnpm test"
     other = tmp_path / "py"
     (other / "tests").mkdir(parents=True)
-    assert detect_check(str(other)) == "python -m pytest -q"
+    assert detect_check(str(other)) in ("python -m pytest -q", "python3 -m pytest -q")  # python3 where there is no `python` (macOS)
 
 
 def test_run_check_timeout_kills_process_group(tmp_path):
@@ -694,3 +694,70 @@ def test_new_lap_clears_previous_lap_text(repo, tmp_path):
                                                         min_lap_s=0), cwd=repo)
     h = rep.heats[0]
     assert h.laps == 2 and h.agent_state == "TIMEOUT" and h.agent_summary == ""
+
+
+# ----------------------------------------------------------------- v0.3.0
+def test_lap_that_made_things_worse_is_undone_and_next_lap_sees_what_was_tried(repo, tmp_path):
+    seen = {}
+
+    def worse_then_good(lane, fl):
+        if len(fl.goals[1]) == 1:
+            tool_write(lane, "calc.py", "def add(a, b):\n    raise ValueError('nope')\n")  # 0 passed < baseline 1
+        else:
+            seen["start_of_lap2"] = Path(lane.worktree, "calc.py").read_text()
+            good_fix(lane, fl)
+
+    iso = IsolationMap()
+    fl = FakeLauncher(iso, [worse_then_good])
+    rep = Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check=CHECK, timeout_s=60, laps=3,
+                                                        min_lap_s=0), cwd=repo)
+    assert seen["start_of_lap2"] == "def add(a, b):\n    return a - b\n"      # reset to the starting code
+    second = fl.goals[1][1]
+    assert "FEWER tests passing" in second and "raise ValueError" in second   # told what was tried
+    assert rep.winner is not None and rep.heats[0].laps == 2
+
+
+def test_lap_that_did_not_regress_keeps_its_changes(repo, tmp_path):
+    seen = {}
+
+    def partial_then_good(lane, fl):
+        if len(fl.goals[1]) == 1:
+            tool_write(lane, "calc.py", "def add(a, b):\n    return a - b  # looked at it\n")  # same count as baseline
+        else:
+            seen["start_of_lap2"] = Path(lane.worktree, "calc.py").read_text()
+            good_fix(lane, fl)
+
+    iso = IsolationMap()
+    fl = FakeLauncher(iso, [partial_then_good])
+    Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check=CHECK, timeout_s=60, laps=3, min_lap_s=0), cwd=repo)
+    assert "# looked at it" in seen["start_of_lap2"]
+    assert "FEWER" not in fl.goals[1][1] and "looked at it" in fl.goals[1][1]
+
+
+def test_check_that_cannot_run_stops_before_any_attempt(repo, tmp_path):
+    iso = IsolationMap()
+    fl = FakeLauncher(iso, [good_fix])
+    with pytest.raises(RuntimeError, match="could not run"):
+        Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check="no-such-command-xyz --q", timeout_s=60),
+                                            cwd=repo)
+    assert fl.goals == {}                                  # nothing launched
+    assert not Path(repo, ".heats").exists()               # worktrees cleaned up
+    assert subprocess.run(["git", "branch", "--list", "heats/*"], cwd=repo, capture_output=True, text=True).stdout.strip() == ""
+
+
+def test_goal_runs_check_first_and_context_carries_the_brief(repo, tmp_path):
+    iso = IsolationMap()
+    fl = FakeLauncher(iso, [good_fix])
+    contexts = []
+    orig = fl.launch
+
+    def spy(**kw):
+        contexts.append(kw["context"])
+        return orig(**kw)
+    fl.launch = spy
+    Runner(fl, iso, tmp_path / "d").run(RunConfig(task="t", n=1, check=CHECK, timeout_s=60,
+                                                  attempt_context="BRIEF: be a careful coder"), cwd=repo)
+    g = fl.goals[1][0]
+    assert g.index("run the check") < g.index("fix it") and "patch tool" in g and "attempt 1 of 1" not in g
+    assert "Finish with one sentence" not in g
+    assert contexts and contexts[0].endswith("BRIEF: be a careful coder")

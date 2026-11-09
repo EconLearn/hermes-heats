@@ -35,6 +35,57 @@ class CheckResult:
             "command", "exit_code", "duration_s", "passed", "failed", "timed_out", "tail", "error")} | {"ok": self.ok}
 
 
+def _python_for(p: Path) -> str:
+    """The project's own interpreter when it has a venv (relative, so it also works in a worktree where
+    the venv is linked), else ``python``, else ``python3`` (macOS has no ``python``)."""
+    import shutil
+    for v in (".venv", "venv"):
+        if (p / v / "bin" / "python").exists():
+            return f"{v}/bin/python"
+    return "python" if shutil.which("python") else "python3"
+
+
+def editable_pythonpath(root: str, wt: str) -> list[str]:
+    """Worktree equivalents of the main-checkout folders an editable install points at.
+
+    A venv linked into a worktree still imports the user's checkout through its ``.pth`` files and
+    ``__editable__`` finders (``pip install -e .`` with a src layout). Putting the worktree's copies on
+    PYTHONPATH makes them win (PYTHONPATH comes before site-packages; editable finders are appended to
+    sys.meta_path, after the path finder)."""
+    root, wt = os.path.realpath(root), os.path.realpath(wt)
+    out: list[str] = []
+
+    def add(path: str) -> None:
+        path = os.path.normpath(path)
+        if path == root or path.startswith(root + os.sep):
+            mapped = os.path.join(wt, os.path.relpath(path, root)) if path != root else wt
+            if mapped not in out and os.path.isdir(mapped):
+                out.append(mapped)
+
+    for v in (".venv", "venv", "env"):
+        venv = Path(wt) / v
+        if not (venv / "pyvenv.cfg").exists():
+            continue
+        for sp in list(venv.glob("lib/python*/site-packages")) + list(venv.glob("Lib/site-packages")):
+            try:
+                entries = list(sp.iterdir())
+            except OSError:
+                continue
+            for f in entries:
+                try:
+                    if f.suffix == ".pth":
+                        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                            line = line.strip()
+                            if line and not line.startswith(("#", "import ")) and os.path.isabs(line):
+                                add(line)
+                    elif f.name.startswith("__editable__") and f.suffix == ".py":
+                        for q in re.findall(r"""['"](/[^'"]+)['"]""", f.read_text(encoding="utf-8", errors="replace")):
+                            add(os.path.dirname(os.path.normpath(q)))  # MAPPING values are package dirs / module files
+                except OSError:
+                    continue
+    return out
+
+
 def detect_check(root: str) -> Optional[str]:
     """Best guess at the project's test command, or None."""
     p = Path(root)
@@ -55,7 +106,7 @@ def detect_check(root: str) -> Optional[str]:
     py_markers = ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "conftest.py")
     has_py_tests = (p / "tests").is_dir() or (p / "test").is_dir() or any(p.glob("test_*.py"))
     if has_py_tests or any((p / m).is_file() for m in py_markers[:1]):
-        return "python -m pytest -q"
+        return f"{_python_for(p)} -m pytest -q"
     mk = p / "Makefile"
     if mk.is_file():
         try:
@@ -98,12 +149,55 @@ def parse_counts(output: str) -> tuple[Optional[int], Optional[int]]:
     return None, None
 
 
+def _heat_main_root(cwd: str) -> Optional[str]:
+    """The user's main checkout when *cwd* is one of Heats' worktrees (``<root>/.heats/<run>/h<N>``)."""
+    real = os.path.realpath(cwd)
+    marker = os.sep + ".heats" + os.sep
+    if marker not in real + os.sep:
+        return None
+    try:
+        cp = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=real, capture_output=True, text=True,
+                            timeout=30, stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    common = cp.stdout.strip()
+    if cp.returncode != 0 or not common:
+        return None
+    common = os.path.realpath(os.path.join(real, common))
+    if os.path.basename(common) != ".git":
+        return None
+    root = os.path.dirname(common)
+    return root if real.startswith(root + marker) else None
+
+
+def point_at_worktree(command: str, cwd: str, repo_root: Optional[str] = None) -> str:
+    """*command* with references to the user's main checkout (``cd /abs/repo && pytest``) pointed at
+    the worktree *cwd*, so a heat is judged on its own code, not on the user's checkout."""
+    root = repo_root or _heat_main_root(cwd)
+    if not root or not isinstance(command, str):
+        return command
+    from .isolation import Lane, _rewrite_command
+    root, wt = os.path.realpath(root), os.path.realpath(cwd)
+    if root == wt:
+        return command
+    return _rewrite_command(command, Lane(root=root, worktree=wt, heat=0))
+
+
 def run_check(command: str, cwd: str, timeout_s: float = 600, env_extra: Optional[dict] = None,
-              max_output_bytes: int = 8_000_000) -> CheckResult:
+              max_output_bytes: int = 8_000_000, repo_root: Optional[str] = None) -> CheckResult:
     """Run *command* in *cwd* through the shell. Output goes to a temp file (memory stays flat), the
     whole process group is killed afterwards (so servers a test suite started do not linger), and
-    only the tail is kept."""
+    only the tail is kept. In a Heats worktree, absolute references to the main checkout in the
+    command are pointed at the worktree first (*repo_root*, or found from git)."""
     import tempfile
+    shell_command = point_at_worktree(command, cwd, repo_root)
+    main_root = repo_root or _heat_main_root(cwd)
+    if main_root and os.path.realpath(main_root) != os.path.realpath(cwd):
+        extra_path = editable_pythonpath(main_root, cwd)
+        if extra_path:
+            env_extra = dict(env_extra or {})
+            prev = env_extra.get("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+            env_extra["PYTHONPATH"] = os.pathsep.join(extra_path + ([prev] if prev else []))
     env = dict(os.environ)
     env.update({"CI": "1", "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1", "FORCE_COLOR": "0"})
     env.pop("PYTEST_ADDOPTS", None)
@@ -112,7 +206,7 @@ def run_check(command: str, cwd: str, timeout_s: float = 600, env_extra: Optiona
     start = time.monotonic()
     with tempfile.TemporaryFile() as out:
         try:
-            proc = subprocess.Popen(command, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen(shell_command, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
         except OSError as exc:
             return CheckResult(command, None, 0.0, error=f"could not start the check: {exc}")
@@ -150,16 +244,98 @@ def is_test_path(path: str) -> bool:
     return bool(_TEST_PATH.search(path.replace("\\", "/")))
 
 
+# Files that define how the tests run: changing them can skip the failing test without fixing anything.
+_TEST_CONFIG_FILE = re.compile(
+    r"(^|/)(pytest\.ini|tox\.ini|noxfile\.py|\.mocharc(\.[a-z]+)?|phpunit\.xml(\.dist)?|"
+    r"(jest|vitest|karma|playwright|cypress|ava|mocha)\.config\.[cm]?[jt]s(on)?|"
+    r"jest\.setup\.[cm]?[jt]s|vitest\.workspace\.[cm]?[jt]s)$")
+_MAKEFILES = {"Makefile", "makefile", "GNUmakefile"}
+_PKG_TEST_KEY = re.compile(r'"(?:pre|post)?test(?::[^"]*)?"\s*:')
+_PYTEST_KEYS = re.compile(r"^\s*(addopts|testpaths|python_files|python_classes|python_functions|norecursedirs|"
+                          r"required_plugins|minversion|collect_ignore|usefixtures)\s*=|\[\s*(tool[.:])?pytest")
+_SECTION = re.compile(r"^\s*\[+\s*([^\]]+?)\s*\]+")
+_MAKE_TARGET = re.compile(r"^([A-Za-z0-9_.%/$(){}-]+(?:\s+[A-Za-z0-9_.%/$(){}-]+)*)\s*::?(?!=)")
+
+
+def _is_test_target(names: str) -> bool:
+    return any(n == "check" or n.startswith("test") or n.endswith("test") or n.endswith("tests")
+               for n in names.split())
+
+
+def harness_changes(patch: Optional[bytes]) -> list[str]:
+    """Files in *patch* whose change touches the definition of the test command: the ``test`` script in
+    package.json, the pytest section of pyproject.toml / setup.cfg, a Makefile's test target."""
+    if not patch:
+        return []
+    text = patch.decode("utf-8", "replace") if isinstance(patch, bytes) else str(patch)
+    out: list[str] = []
+    for section in re.split(r"(?m)^(?=diff --git )", text):
+        m = re.search(r"(?m)^\+\+\+ (?:b/)?(.+)$", section) or re.search(r"(?m)^--- (?:a/)?(.+)$", section)
+        if not m:
+            continue
+        path = m.group(1).strip().strip('"')
+        if path == "/dev/null":
+            m2 = re.search(r"(?m)^--- (?:a/)?(.+)$", section)
+            path = m2.group(1).strip().strip('"') if m2 else path
+        name = path.rsplit("/", 1)[-1]
+        if name not in ("package.json", "pyproject.toml", "setup.cfg") and name not in _MAKEFILES:
+            continue
+        hit = False
+        current = ""
+        for line in section.splitlines():
+            if line.startswith(("+++", "---", "diff --git", "index ")):
+                continue
+            if line.startswith("@@"):
+                ctx = line.split("@@", 2)[-1].strip()
+                current = ""
+                if name in _MAKEFILES:
+                    tm = _MAKE_TARGET.match(ctx)
+                    current = tm.group(1) if tm else ""
+                else:
+                    sm = _SECTION.match(ctx)
+                    current = sm.group(1) if sm else ""
+                continue
+            if not line or line[0] not in "+- ":
+                continue
+            body, changed = line[1:], line[0] in "+-"
+            if name in _MAKEFILES:
+                tm = _MAKE_TARGET.match(body)
+                if tm:
+                    current = tm.group(1)
+                if changed and (_is_test_target(current) or (tm and _is_test_target(tm.group(1)))):
+                    hit = True
+            elif name == "package.json":
+                if changed and _PKG_TEST_KEY.search(body):
+                    hit = True
+            else:
+                sm = _SECTION.match(body)
+                if sm:
+                    current = sm.group(1)
+                if changed and ("pytest" in current or _PYTEST_KEYS.search(body)):
+                    hit = True
+            if hit:
+                break
+        if hit and path not in out:
+            out.append(path)
+    return out
+
+
 @dataclass
 class Guard:
-    """Files a heat may not change: by default every test file (so a heat cannot 'win' by
-    deleting or weakening the test that judges it)."""
+    """Files a heat may not change: by default every test file and the files that define how the tests
+    run (so a heat cannot 'win' by deleting or weakening the test that judges it, or by skipping it)."""
     protect_tests: bool = True
     extra: list[str] = field(default_factory=list)
 
-    def violations(self, files: list[str]) -> list[str]:
+    def violations(self, files: list[str], patch: Optional[bytes] = None) -> list[str]:
         out = []
         for f in files:
-            if (self.protect_tests and is_test_path(f)) or any(f == e or f.startswith(e.rstrip("/") + "/") for e in self.extra):
+            if (self.protect_tests and (is_test_path(f) or _TEST_CONFIG_FILE.search(f.replace("\\", "/")))) \
+                    or any(f == e or f.startswith(e.rstrip("/") + "/") for e in self.extra):
                 out.append(f)
+        if self.protect_tests:
+            data = patch if patch is not None else getattr(files, "patch_data", None)
+            for f in harness_changes(data):
+                if f not in out:
+                    out.append(f)
         return out

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .heats_core import gitops
+from .heats_core import referee as _referee
 from .heats_core.isolation import IsolationMap, note_terminal_result, rewrite, shared_git_command
 from .heats_core.runner import MAX_HEATS, RunConfig, Runner, apply_heat, list_runs, load_report, new_run_id
 
@@ -53,6 +54,17 @@ def _cwd() -> str:
         return str(resolve_agent_cwd())
     except Exception:
         return os.getcwd()
+
+
+def _coding_brief() -> str:
+    """Hermes's own coding-agent brief. Hermes adds it only on interactive platforms, so subagents
+    (the attempts) never get it; measured: without it a 4B attempt rewrote whole files and claimed
+    passes it did not have far more often than the main agent."""
+    try:
+        from agent.coding_context import CODING_AGENT_GUIDANCE
+        return str(CODING_AGENT_GUIDANCE)
+    except Exception:
+        return ""
 
 
 def _setting(key: str, default: Any) -> Any:
@@ -142,7 +154,7 @@ HEATS_RUN = {
             "n": {"type": "integer", "minimum": 1, "maximum": MAX_HEATS, "description": "Number of parallel attempts (default from settings, usually 3)."},
             "check": {"type": "string", "description": "Shell command that exits 0 when the task is solved, e.g. 'python -m pytest -q tests/test_parser.py'. Omit to auto-detect (pytest, npm/pnpm/yarn test, cargo test, go test, make test)."},
             "models": {"type": "array", "items": {"type": "string"}, "description": "Optional model names to race against each other; attempts cycle through them. Omit to use the delegation model."},
-            "timeout_minutes": {"type": "number", "description": "Wall-clock limit for the attempts (default from settings, 15)."},
+            "timeout_minutes": {"type": "number", "description": "Wall-clock limit for the attempts (default from settings, 20)."},
             "laps": {"type": "integer", "description": "Max launches per attempt; a failing attempt is restarted with the check output (default from settings, 3)."},
             "repo_path": {"type": "string", "description": "Repository to work on (default: the session's working directory)."},
         },
@@ -199,7 +211,7 @@ def _handle_run(args: dict, **kwargs) -> str:
         raw_models = [m.strip() for m in raw_models.split(",")]
     models = [m.strip() for m in raw_models if isinstance(m, str) and m.strip()]
     try:
-        timeout_min = float(args.get("timeout_minutes") or _setting("timeout_minutes", 15))
+        timeout_min = float(args.get("timeout_minutes") or _setting("timeout_minutes", 20))
     except (TypeError, ValueError):
         return _err("timeout_minutes must be a number")
     try:
@@ -216,6 +228,7 @@ def _handle_run(args: dict, **kwargs) -> str:
         protected_paths=list(_setting("protected_paths", []) or []),
         run_baseline=bool(_setting("run_baseline", True)),
         laps=laps, finish_early=bool(_setting("finish_early", True)),
+        attempt_context=_coding_brief(),
     )
     cwd = os.path.expanduser(args.get("repo_path") or _cwd())
     if not os.path.isdir(cwd):
@@ -386,20 +399,48 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, **kwargs
         return {"action": "block", "message": msg} if msg else None
     if lane.blocked:
         return {"action": "block", "message": f"Heats: the run for attempt {lane.heat} has ended; stop now."}
+    try:
+        msg = _lane_refusal(tool_name, args if isinstance(args, dict) else {}, lane)
+    except Exception as exc:  # Hermes runs hooks fail-open: an error here must refuse, not allow
+        logger.warning("heats: pre_tool_call check failed: %s", exc)
+        msg = f"Heats could not check this {tool_name} call safely ({type(exc).__name__}); rephrase it more simply."
+    return {"action": "block", "message": msg} if msg else None
+
+
+def _lane_refusal(tool_name: str, args: dict, lane) -> Optional[str]:
+    """Why a heat's tool call must not run, or None."""
+    from .heats_core import isolation as _iso
+    wt = os.path.realpath(lane.worktree)
     if tool_name == "terminal":
-        sub = shared_git_command((args or {}).get("command"))
-        if sub:
-            return {"action": "block", "message": (f"Heats: `git {sub}` changes state shared with the user's own "
-                                                   "checkout and is not allowed in an attempt. Edit files and run the check instead.")}
+        cmd = args.get("command")
+        workdir = args.get("workdir") or lane.default_dir()
+        hit = _iso.git_guard(cmd, workdir)
+        if hit:
+            sub, why = hit
+            return (f"Heats: refused `{sub}` in attempt {lane.heat}: {why}. An attempt may only edit files and use "
+                    "local git commands (status, diff, log, add, commit, reset, restore, ...). Edit files and run the "
+                    "check instead.")
+        esc = _iso.escaping_path(cmd, workdir, lane)
+        if esc:
+            return (f"Heats: `{esc}` leads out of attempt {lane.heat}'s worktree into the user's own checkout (or "
+                    f"another attempt). Work inside {lane.worktree}; use paths relative to it.")
         return None
     if tool_name not in _WRITE_TOOLS:
         return None
-    p = (args or {}).get("path")
+    paths = []
+    p = args.get("path")
     if isinstance(p, str) and p:
-        real = os.path.realpath(os.path.expanduser(p))
-        wt = os.path.realpath(lane.worktree)
+        paths.append(p)
+    v4a = _iso.v4a_paths(args.get("patch"))
+    for vp in v4a:
+        if not os.path.isabs(os.path.expanduser(vp)):
+            # Hermes would resolve it against the session cwd (the user's checkout); the middleware makes
+            # every header absolute, so a relative one here means it did not run.
+            return f"Heats: attempt {lane.heat}: use absolute paths under {lane.worktree} in patch headers."
+    for path in paths + v4a:
+        real = os.path.realpath(os.path.expanduser(path))
         if not (real == wt or real.startswith(wt + os.sep)):
-            return {"action": "block", "message": f"Heats: attempt {lane.heat} may only write inside {lane.worktree}"}
+            return f"Heats: attempt {lane.heat} may only write inside {lane.worktree} (refused: {path})"
     return None
 
 
@@ -437,7 +478,7 @@ def _cmd(raw: str = "", **_) -> str:
                 h = next((x for x in rep["heats"] if str(x["index"]) == parts[2]), None)
                 if not h:
                     return f"No heat {parts[2]} in {parts[1]}"
-                patch = Path(h["patch_file"]).read_text(encoding="utf-8") if h.get("patch_file") else ""
+                patch = Path(h["patch_file"]).read_text(encoding="utf-8", errors="replace") if h.get("patch_file") else ""
                 tail = (h.get("check") or {}).get("tail", "")
                 return (f"Heat {h['index']} ({h['strategy']}, {h.get('model') or 'default'}): "
                         f"{h.get('agent_summary') or ''}\n\n```diff\n{patch[:6000]}\n```\n\nCheck output (tail):\n```\n{tail[-1500:]}\n```")
@@ -475,6 +516,32 @@ def _cli(args) -> None:
 
 
 # --------------------------------------------------------------- register
+
+def _max_verify_nudges() -> int:
+    try:
+        from agent.verify_hooks import max_verify_nudges
+        return int(max_verify_nudges())
+    except Exception:
+        return 3
+
+
+def _on_pre_verify(changed_paths: Optional[list] = None, attempt: int = 0, session_id: str = "", **kwargs):
+    """Referee: the main agent edited code and wants to finish; run the check, send it back on red."""
+    if not _setting("referee", True):
+        return None
+    try:
+        timeout = float(_setting("referee_timeout_seconds", 120))
+        out = _referee.review(list(changed_paths or []), int(attempt or 0), _max_verify_nudges(),
+                              check=_setting("check", "") or None, timeout_s=timeout)
+        rec = {"ts": time.time(), "session_id": session_id, "attempt": attempt, "nudged": bool(out),
+               "paths": list(changed_paths or [])[:20]}
+        with open(_data_dir() / "referee.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        return out
+    except Exception as exc:  # never break the user's turn
+        logger.warning("heats referee failed: %s", exc)
+        return None
+
 def register(ctx) -> None:
     global _CTX
     _CTX = ctx
@@ -484,6 +551,7 @@ def register(ctx) -> None:
     ctx.register_middleware("tool_request", _mw_tool_request)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
+    ctx.register_hook("pre_verify", _on_pre_verify)
     ctx.register_command("heats", _cmd, description="List, show and apply Heats runs", args_hint="[list|show|apply] [run_id] [heat]")
     ctx.register_cli_command(name="heats", help="List, show and apply Heats runs", setup_fn=_cli_setup, handler_fn=_cli)
     skill = Path(__file__).parent / "skills" / "heats" / "SKILL.md"

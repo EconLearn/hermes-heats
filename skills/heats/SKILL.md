@@ -10,7 +10,7 @@ small feature has a test command that decides success and a single attempt is un
 local model, a flaky area, a fix you got wrong once already).
 
 1. Make sure there is an objective check: a test file or command that FAILS now and should PASS after the fix.
-   If none exists, ask the user, or write the failing test first in the main checkout and commit it.
+   If none exists, ask the user, or write the failing test first in the main checkout (it does not need to be committed: attempts start from your working tree, uncommitted edits included).
 2. Write `task` so it stands alone: the attempts see nothing else from this chat. Include file names,
    the error message and what "done" means.
 3. Call `heats_run(task=..., n=3, check="<command>")`. It waits up to ~6 minutes. If it returns

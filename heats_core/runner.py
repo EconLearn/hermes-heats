@@ -27,11 +27,12 @@ MAX_HEATS = 8
 TERMINAL_STATES = {"SUCCEEDED", "FAILED", "INTERRUPTED", "CANCELLED", "UNKNOWN"}
 
 DEFAULT_STRATEGIES = [
-    ("minimal", "Make the smallest change that fixes the problem. Do not refactor."),
+    ("standard", "Fix the real cause of the failure the check shows; rewrite the faulty code if that is cleaner than patching around it."),
     ("root-cause", "Read the relevant code first and find the root cause, then fix that cause properly."),
-    ("test-first", "Run the check first to see exactly what fails, then iterate: change, re-run, until it passes."),
+    ("minimal", "Make the smallest change that fixes the problem. Do not refactor."),
     ("fresh-eyes", "Do not assume the obvious culprit; list two possible causes, check both, then fix the real one."),
 ]
+CANNOT_RUN_EXIT_CODES = (126, 127)  # shell: not executable / command not found
 
 
 class Launcher(Protocol):
@@ -48,7 +49,7 @@ class RunConfig:
     n: int = 3
     check: Optional[str] = None
     models: list[str] = field(default_factory=list)
-    timeout_s: float = 900
+    timeout_s: float = 1200
     check_timeout_s: float = 600
     protect_tests: bool = True
     protected_paths: list[str] = field(default_factory=list)
@@ -58,6 +59,7 @@ class RunConfig:
     finish_early: bool = False    # the first heat that qualifies ends the race (others are stopped and judged)
     min_lap_s: float = 90         # do not start a new lap with less time than this left
     run_id: Optional[str] = None  # preset by the caller (the plugin returns it before the race ends)
+    attempt_context: str = ""     # extra brief for every attempt (the plugin passes Hermes's coding guidance)
 
 
 @dataclass
@@ -100,28 +102,33 @@ def new_run_id() -> str:
     return time.strftime("%m%d-%H%M%S") + "-" + secrets.token_hex(2)
 
 
+_EDIT_RULES = ("Edit with the patch tool (replace the exact faulty lines); use write_file only for new files, and "
+               "never paste read_file's line-number prefixes into a file. Describing a change does nothing: only "
+               "tool calls change files.")
+
+
 def build_goal(task: str, heat: int, n: int, strategy: str, check: str, worktree: str) -> str:
+    who = f"You are attempt {heat} of {n} running in parallel on this task" if n > 1 else "You are working on this task"
     return (
         f"{task.strip()}\n\n"
-        f"---\nYou are attempt {heat} of {n} running in parallel on this task (a Heats run). "
-        f"Your own copy of the repository is at: {worktree}\n"
+        f"---\n{who} (a Heats run). Your own copy of the repository is at: {worktree}\n"
         "Work only inside that directory; your file and terminal tools already start there.\n"
-        f"Approach for this attempt: {strategy}\n"
-        "Steps: (1) read the relevant files; (2) make the change with the write_file or patch tool "
-        "(describing a change does nothing, only tool calls change files); "
-        f"(3) run the check with the terminal tool: `{check}`; (4) if it fails, fix and run it again.\n"
-        "Success is judged only by that command exiting 0 in your copy, checked independently after you finish. "
-        "Do not edit, delete or skip existing tests, and do not commit. "
-        "Finish with one sentence: what you changed and the check's actual result."
+        f"Approach: {strategy}\n"
+        f"Steps: (1) run the check with the terminal tool to see what fails: `{check}`; (2) read the code it points to; "
+        f"(3) fix it. {_EDIT_RULES} (4) run the check again; repeat until it exits 0, then stop.\n"
+        "Heats runs the check itself after you stop and judges only by its exit code, so do not spend steps on a "
+        "summary. Do not edit, delete or skip existing tests, and do not commit."
     )
 
 
 def build_followup_goal(task: str, heat: int, lap: int, laps: int, check: str, worktree: str,
-                        h: HeatResult) -> str:
+                        h: HeatResult, tried: str = "", reverted: str = "") -> str:
     """Goal for the next lap of a heat whose last lap ended without passing. Everything stated here
     was measured by Heats in the worktree, not taken from the previous lap's own claims."""
     c = h.check
-    if h.files:
+    if reverted:
+        changed = reverted
+    elif h.files:
         changed = f"files changed so far (kept in your copy): {', '.join(h.files[:8])} (+{h.insertions} -{h.deletions})"
     else:
         changed = ("NOTHING has been changed in your copy so far. Describing or planning a change does nothing: "
@@ -136,6 +143,8 @@ def build_followup_goal(task: str, heat: int, lap: int, laps: int, check: str, w
     guard = (f"\nYou edited protected test files ({', '.join(h.guarded[:5])}); an attempt that edits tests cannot win. "
              "Restore them exactly (e.g. `git checkout -- <file>`) and fix the code instead.") if h.guarded else ""
     tail = (c.tail if c else "")[-1500:]
+    tried_txt = (f"What the previous lap changed (diff against the starting code):\n```diff\n{tried[-1500:]}\n```\n"
+                 "That did not work; do not simply repeat it.\n") if tried.strip() else ""
     return (
         f"{task.strip()}\n\n"
         f"---\nYou are continuing attempt {heat} (lap {lap} of {laps}) of a Heats run. "
@@ -143,11 +152,10 @@ def build_followup_goal(task: str, heat: int, lap: int, laps: int, check: str, w
         "Work only inside that directory; your file and terminal tools already start there.\n"
         "The previous lap ended but the task is NOT done. Heats measured, just now:\n"
         f"- {changed}\n- {result}{guard}\n"
-        f"Last lines of the check output:\n```\n{tail}\n```\n"
-        "Steps: (1) read the failing code and the output above; (2) change the code with write_file or patch; "
-        f"(3) run `{check}` with the terminal tool; (4) repeat until it exits 0. "
-        "Do not edit, delete or skip existing tests, and do not commit. "
-        "Finish with one sentence: what you changed and the check's actual result."
+        f"Last lines of the check output:\n```\n{tail}\n```\n{tried_txt}"
+        f"Steps: (1) read the failing code and the output above; (2) fix it. {_EDIT_RULES} "
+        f"(3) run `{check}` with the terminal tool; (4) repeat until it exits 0, then stop. "
+        "Heats judges only by the check's exit code. Do not edit, delete or skip existing tests, and do not commit."
     )
 
 
@@ -170,6 +178,10 @@ class Runner:
         root = gitops.repo_root(cwd)
         if not root:
             raise gitops.HeatsGitError(f"{cwd} is not inside a git repository; Heats needs git worktrees")
+        try:  # worktrees/branches left by a run that was killed (e.g. Hermes restarted mid-race)
+            gitops.cleanup_stale(root, {cfg.run_id} if cfg.run_id else set(), min_age_s=6 * 3600)
+        except Exception:
+            pass
         n = max(1, min(int(cfg.n), MAX_HEATS))
         check = (cfg.check or "").strip() or detect_check(root)
         if not check:
@@ -214,7 +226,18 @@ class Runner:
                 self._linked[real] = tuple(gitops.link_dependency_dirs(root, real))
             self.progress(f"heats {run_id}: {n} worktrees ready from {base[:8]}{' (your working tree)' if dirty else ''}")
             self._emit("starting", heats)
-            base_future = pool.submit(self._baseline, root, base, run_id, check, cfg) if cfg.run_baseline else None
+            base_future = None
+            if cfg.run_baseline:  # measured before any attempt starts: a check that cannot run stops the race here
+                baseline = self._baseline(root, base, run_id, check, cfg)
+                self._live["baseline"] = {"ok": baseline.ok, "passed": baseline.passed, "failed": baseline.failed}
+                if baseline.exit_code in CANNOT_RUN_EXIT_CODES or (baseline.exit_code is None and not baseline.timed_out):
+                    raise RuntimeError(f"the check command could not run (exit {baseline.exit_code}): `{check}`. "
+                                       f"Output: {(baseline.error or baseline.tail)[-300:].strip()} -- fix the command and try again")
+                if baseline.ok:
+                    raise RuntimeError(f"the check `{check}` already passes on your current code"
+                                       f"{f' ({baseline.passed} passed)' if baseline.passed is not None else ''}, so there is "
+                                       "nothing for Heats to judge. Name a check that fails now and should pass after the fix "
+                                       "(write the failing test first if there is none).")
 
             for h in heats:
                 wt, _ = lanes[h.index]
@@ -222,7 +245,7 @@ class Runner:
                 goal = build_goal(cfg.task, h.index, n, strategy_text, check, wt)
                 key = f"heats-{run_id}-h{h.index}"
                 try:
-                    handle = self.launcher.launch(goal=goal, context=f"Repository copy: {wt}", model=h.model, key=key)
+                    handle = self.launcher.launch(goal=goal, context=self._context(wt, cfg), model=h.model, key=key)
                 except Exception as exc:  # launch refused: record and carry on with the others
                     h.agent_state, h.agent_error = "FAILED", f"launch failed: {exc}"
                     h._status = "error"  # type: ignore[attr-defined]
@@ -311,18 +334,12 @@ class Runner:
                     if (laps_used[i] < max(1, cfg.laps) and not race_won and not stop_noted
                             and left > cfg.min_lap_s):
                         self._next_lap(heats[i - 1], i, laps_used, cfg, check, lanes, handles, keys, t0,
-                                       finished_children, pending, errors, run_id)
+                                       finished_children, pending, errors, run_id, baseline, base)
             for i, fut in futures.items():
                 try:
                     fut.result()
                 except Exception as exc:
                     errors.append(f"heat {i}: judging failed: {exc}")
-            if base_future is not None:
-                try:
-                    baseline = base_future.result()
-                    self._live["baseline"] = {"ok": baseline.ok, "passed": baseline.passed, "failed": baseline.failed}
-                except Exception as exc:
-                    errors.append(f"baseline check failed to run: {exc}")
             completed = True
         finally:
             pool.shutdown(wait=True)
@@ -371,14 +388,31 @@ class Runner:
     # ------------------------------------------------------------ helpers
     def _next_lap(self, h: HeatResult, i: int, laps_used: dict, cfg: RunConfig, check: str, lanes: dict,
                   handles: dict, keys: dict, t0: dict, finished_children: set, pending: set,
-                  errors: list, run_id: str) -> None:
-        """Relaunch heat *i* in its own worktree with what the last lap left behind."""
+                  errors: list, run_id: str, baseline: Optional[CheckResult] = None, base: str = "") -> None:
+        """Relaunch heat *i* in its own worktree with what the last lap left behind. A lap that left fewer
+        tests passing than the starting code is undone first, and the next lap is told what was tried."""
         lap = laps_used[i] + 1
         wt = lanes[i][0]
         lane = getattr(h, "_lane", None)
-        goal = build_followup_goal(cfg.task, i, lap, cfg.laps, check, wt, h)
+        raw = b""
         try:
-            handle = self.launcher.launch(goal=goal, context=f"Repository copy: {wt}", model=h.model,
+            raw = Path(h.patch_file).read_bytes() if h.patch_file else b""
+        except OSError:
+            pass
+        tried = raw.decode("utf-8", "replace")
+        reverted = ""
+        c = h.check
+        if (tried.strip() and baseline is not None and c is not None and baseline.passed is not None
+                and c.passed is not None and c.passed < baseline.passed):
+            cp = gitops.git(["apply", "-R", "--whitespace=nowarn", "-"], cwd=wt, input_text=raw, binary=True)
+            if cp.returncode == 0:
+                reverted = (f"the previous lap left FEWER tests passing ({c.passed}) than the starting code "
+                            f"({baseline.passed}), so Heats reset your copy to the starting code")
+            else:
+                errors.append(f"heat {i}: could not undo lap {lap - 1} ({str(cp.stderr or '')[:200]}); continuing from it")
+        goal = build_followup_goal(cfg.task, i, lap, cfg.laps, check, wt, h, tried=tried, reverted=reverted)
+        try:
+            handle = self.launcher.launch(goal=goal, context=self._context(wt, cfg), model=h.model,
                                           key=f"heats-{run_id}-h{i}-lap{lap}")
         except Exception as exc:
             errors.append(f"heat {i}: lap {lap} could not start: {exc}")
@@ -414,6 +448,11 @@ class Runner:
         pending.add(i)
         self.progress(f"heats {run_id}: heat {i} did not pass; lap {lap} of {cfg.laps} started")
         self._emit("running", self._heats_ref)
+
+    @staticmethod
+    def _context(wt: str, cfg: RunConfig) -> str:
+        brief = (cfg.attempt_context or "").strip()
+        return f"Repository copy: {wt}" + (f"\n\n{brief}" if brief else "")
 
     def _emit(self, phase: str, heats: list[HeatResult], **extra) -> None:
         """Push a snapshot of the run to the live view (Desktop pane). Never raises."""
@@ -458,7 +497,7 @@ class Runner:
                guard: Guard, run_dir: Path) -> None:
         patch = gitops.collect_patch(wt, base, ignore=self._linked.get(os.path.realpath(wt), ()))
         h.files, h.insertions, h.deletions = patch.files, patch.insertions, patch.deletions
-        h.guarded = guard.violations(patch.files)
+        h.guarded = guard.violations(patch.files, patch.data)
         pf = run_dir / f"heat{h.index}.patch"
         pf.write_bytes(patch.data)
         h.patch_file = str(pf)

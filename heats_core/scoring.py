@@ -91,7 +91,7 @@ def _fmt_check(c: Optional[CheckResult]) -> str:
         return "timeout"
     if c.exit_code is None:
         return "error"
-    return "PASS" if c.ok else f"FAIL ({c.exit_code})"
+    return "PASS" if c.ok else f"FAIL (exit {c.exit_code})"
 
 
 def scoreboard(run_id: str, results: list[HeatResult], baseline: Optional[CheckResult], check_cmd: str,
@@ -116,7 +116,7 @@ def scoreboard(run_id: str, results: list[HeatResult], baseline: Optional[CheckR
             notes.append(f"{r.laps} laps")
         if r.escaped:
             notes.append(f"{r.escaped} path(s) redirected into its worktree")
-        diff = f"+{r.insertions} -{r.deletions} ({len(r.files)} files)" if r.changed else "-"
+        diff = f"+{r.insertions} -{r.deletions} ({len(r.files)} file{"" if len(r.files) == 1 else "s"})" if r.changed else "-"
         mark = "WIN " if win is r else ""
         lines.append(
             f"| {mark}{pos} | {r.index} | {r.model or 'default'} | {r.strategy} | {_fmt_check(r.check)} | "
@@ -126,6 +126,14 @@ def scoreboard(run_id: str, results: list[HeatResult], baseline: Optional[CheckR
         lines.append(f"Winner: heat {win.index}. Nothing in your repo has changed yet. "
                      f"Apply it with `heats_apply` (run_id `{run_id}`, heat {win.index}) or `/heats apply {run_id} {win.index}`.")
     else:
-        lines.append("No heat passed the check without touching protected files, so there is no winner. "
-                     "Every patch is saved; inspect one with `/heats show " + run_id + " <heat>`.")
+        passed_but_guarded = [r for r in results if r.check is not None and r.check.ok and r.guarded]
+        passed_no_change = [r for r in results if r.check is not None and r.check.ok and not r.changed]
+        if passed_but_guarded:
+            why = (f"heat {', '.join(str(r.index) for r in passed_but_guarded)} passed only after editing protected "
+                   "files (tests), which cannot win")
+        elif passed_no_change:
+            why = "the check passed without any change, so no heat fixed anything"
+        else:
+            why = "no heat got the check to pass"
+        lines.append(f"There is no winner: {why}. Every patch is saved; inspect one with `/heats show {run_id} <heat>`.")
     return "\n".join(lines)
