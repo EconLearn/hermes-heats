@@ -1,0 +1,1 @@
+Fix total_by_category in ledger.py: it reads CSV text with header 'category,amount', amounts may be quoted and contain thousands separators like "1,200.50"; return a dict of category -> total rounded to 2 decimals.

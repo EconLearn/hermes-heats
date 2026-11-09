@@ -1,0 +1,1 @@
+Fix flatten in nested.py: flatten arbitrarily nested lists and tuples into one list, but keep strings and bytes as single items.

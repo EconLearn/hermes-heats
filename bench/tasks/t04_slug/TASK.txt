@@ -1,0 +1,1 @@
+Fix slugify in slug.py: lowercase, ASCII letters and digits kept, every run of other characters becomes a single '-', no leading or trailing '-'.

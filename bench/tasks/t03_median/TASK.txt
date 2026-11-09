@@ -1,0 +1,1 @@
+Fix median in stats.py: it must not modify the caller's list, must handle even-length lists (mean of the two middle values) and raise ValueError on an empty list.

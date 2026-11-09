@@ -69,20 +69,34 @@ A status-bar chip shows `heats 1/3` while a race runs.
 
 ## Measured
 
-Setup: qwen3-4b-instruct on one RTX 4060, 10 small Python bug-fix tasks, 2 runs each. Small samples, single
-model.
+Same free local model throughout (qwen3-4b-instruct-2507, Q4, via Ollama), 10 small Python bug-fix tasks, each a
+tiny repo with failing tests. Solved = the tests pass in your checkout afterwards and the test files are unchanged.
+Small samples, one weak model: read these as evidence about the mechanism, not a general benchmark.
 
-- **Races did not solve more tasks than a plain single attempt** on this setup (plugin v0.2.x). We do not
-  claim a solve-rate gain.
-- **False "done" claims are common.** Across the bench races, 50 of 89 race attempts (75 races, v0.2.x) that said they were finished
-  failed the tests when Heats ran them.
-- **Laps rescue attempts.** In 15 of 39 bench races that had a winner (v0.2.x), the winning attempt had failed its first lap
-  and passed after a restart with the real test output.
-- **No tampered wins.** 0 solved runs had edited tests.
+**Bench v6 (Heats v0.3.0, 9 Nov):** three arms run back to back on every task, 2 runs each.
 
-<!-- MEASURED v6: filled by lead -->
+| Arm | Solved |
+|---|---|
+| Plain Hermes | 8/20 |
+| Hermes + Heats referee | 12/20 |
+| Heats race, one attempt (`heats_run n=1`) | 16/20 |
 
-The bench scripts and raw results are in the source repository's `bench/` folder.
+- Same task and run, head to head: the race solved 8 that plain Hermes did not, and plain Hermes solved 0 that
+  the race did not (exact sign test p = 0.01). The referee: 6 vs 2 (p = 0.29, not significant).
+- Plain Hermes failed mostly by stopping after 2-5 minutes with the tests still red; only 1 of its 12 failures
+  hit the time limit.
+- The referee sent the agent back 19 times in 8 runs.
+- 0 solved runs had edited tests.
+<!-- MEASURED v7: replication on v0.3.1 running; lead fills -->
+
+**Before v0.3.0 the race did not help** (v0.2.x, one RTX 4060): one attempt solved 7/20 against 11/20 for plain
+Hermes. The cause was in Heats: attempts ran without Hermes's coding brief, were told to edit before testing, and a
+lap restarted on code it had made worse. v0.3.0 fixed those three things; v6 is the first bench after the fix.
+
+Across the v0.2.x races, 50 of 89 attempts that said they were done failed the tests when Heats ran them, and in
+15 of 39 races with a winner, the winner had failed its first lap and passed after a restart with the real output.
+
+The bench scripts and every raw result file are in `bench/`.
 
 ## Install
 

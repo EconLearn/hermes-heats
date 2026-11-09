@@ -1,0 +1,1 @@
+Fix parse_duration in duration.py: parse strings like '1h30m', '45s', '2h', '1h2m3s' into total seconds; raise ValueError for empty or malformed input like '5x' or 'h1'.

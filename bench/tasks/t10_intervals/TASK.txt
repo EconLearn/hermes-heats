@@ -1,0 +1,1 @@
+Fix merge_intervals in intervals.py: merge overlapping or touching [start, end] intervals given in any order and return them sorted; do not modify the input.

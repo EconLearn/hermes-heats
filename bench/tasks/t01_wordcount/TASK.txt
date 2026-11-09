@@ -1,0 +1,1 @@
+Fix word_count in textstats.py: words are separated by any whitespace, and empty or blank text has 0 words.
