@@ -219,14 +219,31 @@ def _parse_numstat_z(out: bytes | str) -> list[tuple[int, int, list[str]]]:
 def collect_patch(wt: str, base: str, ignore: tuple[str, ...] = ()) -> Patch:
     """Everything the heat changed relative to *base* (tracked, new and deleted files)."""
     skip = list(ignore) + check_artifacts(wt)
-    excludes = exclude_pathspecs(wt, skip)
-    _must(git(["add", "-A", "--", ".", *excludes], cwd=wt, timeout=120), "git add in heat")
-    d = git(["diff", "--cached", "--binary", base], cwd=wt, timeout=120, binary=True)
-    if d.returncode != 0:
-        raise HeatsGitError(f"git diff in heat failed: {d.stderr.strip()[-200:]}")
-    data = d.stdout
-    # -z and quotePath=false: non-ASCII names come back as they are (not C-quoted), renames as two fields
-    stat = git(["-c", "core.quotePath=false", "diff", "--cached", "--numstat", "-z", base], cwd=wt, timeout=120)
+    # Staged through a temporary copy of the heat's index, so the heat's own index is left as it was
+    # (otherwise `git checkout -- f` / `git restore f` / `git diff` in the next lap see the judged edits).
+    idx = git(["rev-parse", "--git-path", "index"], cwd=wt).stdout.strip()
+    real_index = idx if os.path.isabs(idx) else os.path.join(wt, idx)
+    tmp_index = f"{real_index}.heats-{os.getpid()}-{threading.get_ident()}"
+    env = {"GIT_INDEX_FILE": tmp_index}
+    try:
+        if os.path.exists(real_index):
+            shutil.copyfile(real_index, tmp_index)
+        else:
+            _must(git(["read-tree", "HEAD"], cwd=wt, env_extra=env), "git read-tree in heat")
+        excludes = exclude_pathspecs(wt, skip, env_extra=env)
+        _must(git(["add", "-A", "--", ".", *excludes], cwd=wt, timeout=120, env_extra=env), "git add in heat")
+        d = git(["diff", "--cached", "--binary", base], cwd=wt, timeout=120, binary=True, env_extra=env)
+        if d.returncode != 0:
+            raise HeatsGitError(f"git diff in heat failed: {d.stderr.strip()[-200:]}")
+        data = d.stdout
+        # -z and quotePath=false: non-ASCII names come back as they are (not C-quoted), renames as two fields
+        stat = git(["-c", "core.quotePath=false", "diff", "--cached", "--numstat", "-z", base], cwd=wt, timeout=120,
+                   env_extra=env)
+    finally:
+        try:
+            os.unlink(tmp_index)
+        except OSError:
+            pass
     files, ins, dels = PathList(), 0, 0
     for i, dl, paths in _parse_numstat_z(stat.stdout):
         for p in paths:
@@ -393,54 +410,67 @@ _RUN_ID = re.compile(r"^\d{4}-\d{6}-[0-9a-f]{4}$")
 
 def prune_stale_runs(root: str, active: "set[str] | list[str] | tuple[str, ...]" = (), min_age_s: float = 0.0) -> list[str]:
     """Remove what a crashed or killed Hermes left behind in *root*: the ``.heats/<run_id>`` worktrees
-    (locked ones too), their ``heats/<run_id>/h*`` branches and the run folders, for every run not in
-    *active* whose folder is older than *min_age_s*. Only names Heats itself creates are touched.
-    Returns the run ids cleaned."""
+    (locked ones too), their ``heats/<run_id>/h*`` branches and the run folders. Only runs that are
+    provably stale are touched: not in *active*, a Heats-made id, no worktree of the run anywhere
+    except under this checkout's ``.heats`` (refs are shared by every worktree, so a race running from
+    another checkout of the same repo is never touched), and every folder of the run older than
+    *min_age_s*. Returns the run ids cleaned."""
     import time as _time
     root = os.path.realpath(root)
     active = set(active or ())
     heats_dir = os.path.join(root, ".heats")
     now = _time.time()
+    run_in_path = re.compile(r"(?:^|/)\.heats/(\d{4}-\d{6}-[0-9a-f]{4})(?:/|$)")
 
-    verdicts: dict[str, bool] = {}
-
-    def stale(run_id: str) -> bool:  # decided once per run, before anything is removed
-        if run_id not in verdicts:
-            d = os.path.join(heats_dir, run_id)
-            ok = run_id not in active and bool(_RUN_ID.match(run_id))
-            if ok and min_age_s > 0:
-                try:
-                    ok = now - os.stat(d).st_mtime >= min_age_s
-                except OSError:
-                    ok = True
-            verdicts[run_id] = ok
-        return verdicts[run_id]
-
-    cleaned: set[str] = set()
+    worktrees: list[str] = []  # every registered worktree path (any checkout)
     wl = git(["worktree", "list", "--porcelain"], cwd=root, timeout=120)
+    if wl.returncode != 0:
+        return []  # cannot see the worktrees: cannot prove anything stale
     for line in wl.stdout.splitlines():
-        if not line.startswith("worktree "):
-            continue
-        path = line[len("worktree "):]
-        for cand in {path, os.path.realpath(path)}:
-            if cand.startswith(heats_dir + os.sep):
-                run_id = cand[len(heats_dir) + 1:].split(os.sep, 1)[0]
-                if stale(run_id):
-                    git(["worktree", "remove", "--force", "--force", path], cwd=root, timeout=120)
-                    cleaned.add(run_id)
-                break
+        if line.startswith("worktree "):
+            worktrees.append(line[len("worktree "):])
+    by_run: dict[str, list[str]] = {}
+    for path in worktrees:
+        m = run_in_path.search(os.path.realpath(path)) or run_in_path.search(path)
+        if m:
+            by_run.setdefault(m.group(1), []).append(path)
     br = git(["for-each-ref", "--format=%(refname)", "refs/heads/heats/"], cwd=root)
+    branches: dict[str, list[str]] = {}
     for ref in br.stdout.splitlines():
         parts = ref.split("/")
-        if len(parts) >= 5 and stale(parts[3]):
+        if len(parts) >= 5:
+            branches.setdefault(parts[3], []).append(ref)
+    dirs = set(os.listdir(heats_dir)) if os.path.isdir(heats_dir) else set()
+
+    def ours(path: str) -> bool:
+        return any(c.startswith(heats_dir + os.sep) for c in {path, os.path.realpath(path)})
+
+    def stale(run_id: str) -> bool:
+        if run_id in active or not _RUN_ID.match(run_id):
+            return False
+        if any(not ours(p) for p in by_run.get(run_id, [])):
+            return False  # a worktree of this run lives in another checkout: not ours to judge
+        if min_age_s > 0:
+            for p in [os.path.join(heats_dir, run_id)] + by_run.get(run_id, []):
+                try:
+                    if now - os.stat(p).st_mtime < min_age_s:
+                        return False
+                except OSError:
+                    continue
+        return True
+
+    cleaned: set[str] = set()
+    for run_id in sorted(set(by_run) | set(branches) | dirs):
+        if not stale(run_id):
+            continue
+        for path in by_run.get(run_id, []):
+            git(["worktree", "remove", "--force", "--force", path], cwd=root, timeout=120)
+        for ref in branches.get(run_id, []):
             git(["update-ref", "-d", ref], cwd=root)
-            cleaned.add(parts[3])
-    if os.path.isdir(heats_dir):
-        for name in os.listdir(heats_dir):
-            full = os.path.join(heats_dir, name)
-            if stale(name) and os.path.isdir(full) and not os.path.islink(full):
-                shutil.rmtree(full, ignore_errors=True)  # symlinked dependency folders are unlinked, not followed
-                cleaned.add(name)
+        full = os.path.join(heats_dir, run_id)
+        if run_id in dirs and os.path.isdir(full) and not os.path.islink(full):
+            shutil.rmtree(full, ignore_errors=True)  # symlinked dependency folders are unlinked, not followed
+        cleaned.add(run_id)
     return sorted(cleaned)
 
 

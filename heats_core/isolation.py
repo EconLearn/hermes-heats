@@ -384,6 +384,8 @@ def _git_verdict(args: list[str], cwd: Optional[str]) -> Optional[tuple[str, str
     sub, rest = args[i].lower(), args[i + 1:]
     first = rest[0] if rest else ""
     pos = _positionals(rest)
+    if sub == "rev-parse" and {"--git-common-dir", "--show-superproject-working-tree"} & set(rest):
+        return "rev-parse", "it reveals the user's own checkout, which an attempt must not reach"
     if sub in _GIT_SAFE:
         return None
     if sub == "stash" and first in ("list", "show"):
@@ -465,11 +467,13 @@ def git_guard(command: Any, cwd: Optional[str] = None, _depth: int = 0) -> Optio
     m = _GIT_ENV.search(command)
     if m:
         return "GIT_" + m.group(1), f"setting GIT_{m.group(1)} can point git at the user's own checkout"
-    if "git" not in command.lower():
-        return None
     toks = _tokens(command)
     if toks is None:
         return _loose(command)
+    # judged on the shell words (quotes and backslashes removed: g''it, gi\\t, "git"), not the raw text
+    joined = " ".join(toks).lower()
+    if "git" not in joined and "$" not in joined:
+        return None
     if _depth > 4:
         return _loose(command)
     for tok in toks:  # command substitutions inside a quoted word run too
@@ -479,6 +483,13 @@ def git_guard(command: Any, cwd: Optional[str] = None, _depth: int = 0) -> Optio
                 return hit
     for seg in _segments(toks):
         j = _cmd_index(seg)
+        if j < len(seg) and "$" in seg[j]:
+            # the command word is a variable ($G, ${G}, $(...)): it may be git; judge its words conservatively
+            words = {w.lower() for w in seg[j + 1:]}
+            hit_word = next((w for w in _GIT_WORDS if w in words), None)
+            if hit_word:
+                return hit_word, (f"the command word `{seg[j]}` is a variable and `{hit_word}` would change state "
+                                  "shared with the user's checkout if it is git; spell `git` out")
         while j < len(seg):
             b = _base(seg[j]).lower()
             if b in ("git", "git.exe"):

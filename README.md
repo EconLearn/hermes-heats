@@ -121,7 +121,7 @@ hermes heats list|show|apply ...         # the same from the shell
 | Key | Default | Meaning |
 |---|---|---|
 | `referee` | true | Run the check when the agent edited code and is about to finish; send it back if it fails |
-| `referee_timeout_seconds` | 120 | Time limit for the referee's check. A check that times out counts as failing |
+| `referee_timeout_seconds` | 25 | Time limit for the referee's check, capped 5 s below Hermes's `plugins.hook_callback_timeout` (30 s by default). A check that runs longer is skipped, never blamed on the agent |
 | `check` | (empty) = auto-detect | Command that exits 0 on success. Used by the referee and by races |
 | `check_timeout_seconds` | 600 | Time limit for one run of the check in a race |
 | `default_heats` | 3 | Attempts per race (1-8) |
@@ -162,7 +162,10 @@ Turn the referee off: `hermes config set plugins.entries.heats.settings.referee 
   commands do not trigger it.
 - The referee runs your whole check. If the repo already has unrelated failing tests, the agent is sent back
   for those too. Set `check` to a narrower command, or turn the referee off.
-- A slow suite can hit `referee_timeout_seconds` (120 s) and counts as failing. Raise it or narrow `check`.
+- Hermes gives a hook 30 s by default, so the referee skips checks that take longer than ~25 s. For a slower
+  suite, set a narrower `check` or raise `plugins.hook_callback_timeout` (and `referee_timeout_seconds`).
+- The referee does not compare against failures that existed before the turn; it tells the agent it may say so
+  and finish if failures are unrelated. A check that cannot run (exit 126/127, pytest exit 4/5) is skipped.
 - Races need a git repository with at least one commit, and the local terminal backend.
 - Each lap is a new subagent. It gets the task and what Heats measured, not the previous lap's conversation.
 - Several attempts on one local GPU share it, so each runs slower and may hit the time limit. Locally, use

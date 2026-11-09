@@ -55,10 +55,26 @@ def test_last_nudge_suggests_a_race_and_flags_test_edits(tmp_path):
     assert "tests/test_m.py" in out["message"]
 
 
-def test_timeout_is_reported(tmp_path):
+def test_timeout_is_skipped_not_blamed_on_the_agent(tmp_path):
     r = _repo(tmp_path)
-    out = referee.review([str(r / "m.py")], 0, 3, check="pytest -q", timeout_s=5, runner=_fake(False, [], timed_out=True))
-    assert "timed out after 5 s" in out["message"]
+    info: dict = {}
+    out = referee.review([str(r / "m.py")], 0, 3, check="pytest -q", timeout_s=5,
+                         runner=_fake(False, [], timed_out=True), info=info)
+    assert out is None and "longer than 5 s" in info["skipped"]
+
+
+def test_check_that_cannot_run_is_skipped(tmp_path):
+    r = _repo(tmp_path)
+    for code, cmd in ((127, "nosuchtool test"), (126, "./notexec"), (5, "python -m pytest -q"), (4, "pytest -q tests/x.py")):
+        def run(c, cwd, timeout_s=0, code=code):
+            return CheckResult(c, code, 0.1, tail="boom")
+        info: dict = {}
+        assert referee.review([str(r / "m.py")], 0, 3, check=cmd, runner=run, info=info) is None, code
+        assert "could not run" in info["skipped"]
+    # exit 4/5 from a non-pytest command is a real failure
+    def run1(c, cwd, timeout_s=0):
+        return CheckResult(c, 5, 0.1, tail="5 failed")
+    assert referee.review([str(r / "m.py")], 0, 3, check="make test", runner=run1) is not None
 
 
 def test_skips_outside_repo_attempt_worktrees_and_mixed_repos(tmp_path):

@@ -223,12 +223,13 @@ def _handle_run(args: dict, **kwargs) -> str:
     toolsets = tuple(_setting("toolsets", ["terminal", "file"]) or ()) or None
     cfg = RunConfig(
         task=task, n=n, check=args.get("check") or _setting("check", "") or None, models=models,
-        timeout_s=max(30.0, timeout_min * 60), check_timeout_s=float(_setting("check_timeout_seconds", 600)),
+        timeout_s=min(max(30.0, timeout_min * 60), 4 * 3600.0),  # at most 4 h: a forgotten race must end check_timeout_s=float(_setting("check_timeout_seconds", 600)),
         protect_tests=bool(_setting("protect_tests", True)),
         protected_paths=list(_setting("protected_paths", []) or []),
         run_baseline=bool(_setting("run_baseline", True)),
         laps=laps, finish_early=bool(_setting("finish_early", True)),
         attempt_context=_coding_brief(),
+        active_run_ids=set(_RUNS),  # races still live in this process: never cleaned up as stale
     )
     cwd = os.path.expanduser(args.get("repo_path") or _cwd())
     if not os.path.isdir(cwd):
@@ -517,6 +518,16 @@ def _cli(args) -> None:
 
 # --------------------------------------------------------------- register
 
+def _hook_timeout() -> float:
+    """Hermes's per-callback hook limit (plugins.hook_callback_timeout, default 30 s)."""
+    try:
+        from hermes_cli.config import read_raw_config
+        v = ((read_raw_config() or {}).get("plugins") or {}).get("hook_callback_timeout")
+        return float(v) if v else 30.0
+    except Exception:
+        return 30.0
+
+
 def _max_verify_nudges() -> int:
     try:
         from agent.verify_hooks import max_verify_nudges
@@ -552,14 +563,19 @@ def _on_pre_verify(changed_paths: Optional[list] = None, attempt: int = 0, sessi
     if not _setting("referee", True):
         return None
     try:
-        timeout = float(_setting("referee_timeout_seconds", 120))
+        # Hermes abandons a pre_verify callback after plugins.hook_callback_timeout (default 30 s); the check
+        # must finish well inside that, or its verdict never reaches the agent.
+        timeout = min(float(_setting("referee_timeout_seconds", 25)), max(5.0, _hook_timeout() - 5.0))
         info: dict = {}
         out = _referee.review(list(changed_paths or []), int(attempt or 0), _max_verify_nudges(),
                               check=_setting("check", "") or None, timeout_s=timeout, info=info)
         rec = {"ts": time.time(), "session_id": session_id, "attempt": attempt, "nudged": bool(out),
                "paths": list(changed_paths or [])[:20], **{k: v for k, v in info.items() if k != "check"}}
-        with open(_data_dir() / "referee.jsonl", "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec) + "\n")
+        try:  # logging must never cost the agent its nudge
+            with open(_data_dir() / "referee.jsonl", "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, default=str) + "\n")
+        except Exception:
+            pass
         if info.get("ran"):
             _publish_referee({"ts": rec["ts"], "nudged": bool(out), **info})
         return out

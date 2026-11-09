@@ -60,6 +60,7 @@ class RunConfig:
     min_lap_s: float = 90         # do not start a new lap with less time than this left
     run_id: Optional[str] = None  # preset by the caller (the plugin returns it before the race ends)
     attempt_context: str = ""     # extra brief for every attempt (the plugin passes Hermes's coding guidance)
+    active_run_ids: set = field(default_factory=set)  # other live races (stale-run cleanup leaves them alone)
 
 
 @dataclass
@@ -179,7 +180,8 @@ class Runner:
         if not root:
             raise gitops.HeatsGitError(f"{cwd} is not inside a git repository; Heats needs git worktrees")
         try:  # worktrees/branches left by a run that was killed (e.g. Hermes restarted mid-race)
-            gitops.cleanup_stale(root, {cfg.run_id} if cfg.run_id else set(), min_age_s=6 * 3600)
+            gitops.cleanup_stale(root, set(cfg.active_run_ids) | ({cfg.run_id} if cfg.run_id else set()),
+                                 min_age_s=6 * 3600)
         except Exception:
             pass
         n = max(1, min(int(cfg.n), MAX_HEATS))

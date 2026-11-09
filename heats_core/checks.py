@@ -104,8 +104,13 @@ def detect_check(root: str) -> Optional[str]:
     if (p / "go.mod").is_file():
         return "go test ./..."
     py_markers = ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "conftest.py")
-    has_py_tests = (p / "tests").is_dir() or (p / "test").is_dir() or any(p.glob("test_*.py"))
-    if has_py_tests or any((p / m).is_file() for m in py_markers[:1]):
+    py_evidence = any((p / m).is_file() for m in py_markers) or any(p.glob("test_*.py")) or any(
+        next(iter((p / d).rglob("*.py")), None) is not None for d in ("tests", "test") if (p / d).is_dir())
+    has_test_dir = (p / "tests").is_dir() or (p / "test").is_dir()
+    # A JS project (package.json, e.g. `npm init` with no test script) with a test/ folder is not a
+    # pytest project: only choose pytest there when there is Python evidence.
+    wants_pytest = has_test_dir or any(p.glob("test_*.py")) or (p / "pytest.ini").is_file()
+    if wants_pytest and (py_evidence or not pkg.is_file()):
         return f"{_python_for(p)} -m pytest -q"
     mk = p / "Makefile"
     if mk.is_file():

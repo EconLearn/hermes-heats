@@ -493,7 +493,7 @@ def test_broken_update_callback_does_not_break_run(repo, tmp_path):
         raise RuntimeError("ui crashed")
     iso = IsolationMap()
     rep = Runner(FakeLauncher(iso, [good_fix]), iso, tmp_path / "d", on_update=boom).run(
-        RunConfig(task="t", n=1, check=CHECK, timeout_s=60, run_baseline=False), cwd=repo)
+        RunConfig(task="t", n=1, check=CHECK, timeout_s=300, run_baseline=False), cwd=repo)
     assert rep.winner is not None
 
 

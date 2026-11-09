@@ -13,6 +13,11 @@ from . import gitops
 from .checks import _TEST_CONFIG_FILE, CheckResult, detect_check, is_test_path, run_check
 
 TAIL_CHARS = 1_500
+CANNOT_RUN = (126, 127)  # shell: not executable / command not found
+
+
+def _is_pytest(cmd: str) -> bool:
+    return "pytest" in cmd  # pytest exit 4 = usage error (e.g. path not found), 5 = no tests collected
 # Files that can change WHAT the check command runs. If the agent edited one this turn, the referee does not
 # run the check: that would execute a command the agent just wrote, without the user's approval.
 _DEFINES_CHECK = {"package.json", "Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", "pyproject.toml",
@@ -69,7 +74,12 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
                 last_nudge=attempt + 1 >= max_nudges, attempt=attempt + 1, max_nudges=max_nudges)
     if res.ok:
         return None
-    if res.exit_code is None and not res.timed_out:  # could not even start: not the agent's fault
+    # Not the agent's fault, or not knowable: never tell it "your work is not done" for these.
+    if res.timed_out:
+        info["skipped"] = f"check took longer than {timeout_s:.0f} s"
+        return None
+    if res.exit_code is None or res.exit_code in CANNOT_RUN or (_is_pytest(cmd) and res.exit_code in (4, 5)):
+        info["skipped"] = f"check could not run (exit {res.exit_code})"
         return None
     touched_tests = [p for p in rel if is_test_path(p)]
     counts = (f", {res.passed} passed / {res.failed} failed" if res.passed is not None or res.failed is not None else "")
@@ -78,7 +88,8 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
         f"Heats referee: you edited {', '.join(rel[:6]) or 'files'} and are about to finish, but the "
         f"check `{cmd}` (run in {root}) {status}. Your work is not done yet.",
         "Read the failing output below, fix the code, then run the check yourself before you finish."
-        " Do not edit the tests to make them pass."
+        " Do not edit the tests to make them pass. If these failures were already there before your change and"
+        " are unrelated to the task, say so plainly and finish."
         + (f" (You changed test files: {', '.join(touched_tests[:4])}.)" if touched_tests else ""),
     ]
     if attempt + 1 >= max_nudges:

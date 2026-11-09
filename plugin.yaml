@@ -23,7 +23,7 @@ config_schema:
   check: {type: str, default: "", label: "Check command", description: "Command that exits 0 on success. Empty = auto-detect (pytest, npm/pnpm/yarn test, cargo test, go test, make test)."}
   check_timeout_seconds: {type: int, default: 600, label: "Check timeout (seconds)"}
   referee: {type: bool, default: true, label: "Referee", description: "When the agent edited code in a git repo and is about to finish, run the check; if it fails, send the agent back with the real output (up to Hermes's max_verify_nudges, 3)."}
-  referee_timeout_seconds: {type: int, default: 120, label: "Referee check timeout (seconds)"}
+  referee_timeout_seconds: {type: int, default: 25, label: "Referee check timeout (seconds)", description: "Capped 5 s below Hermes's plugins.hook_callback_timeout (default 30 s); raise that for slower test suites. A check that runs longer is skipped, never blamed on the agent."}
   models: {type: list, default: [], label: "Models to race", description: "Optional model names; attempts cycle through them. Empty = the delegation model."}
   toolsets: {type: list, default: ["terminal", "file"], label: "Attempt toolsets", description: "Toolsets each attempt may use (never broader than the parent's)."}
   protect_tests: {type: bool, default: true, label: "Protect tests", description: "An attempt that edits test files cannot win."}
