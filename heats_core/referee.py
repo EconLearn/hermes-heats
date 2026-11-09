@@ -10,9 +10,18 @@ import os
 from typing import Callable, Optional
 
 from . import gitops
-from .checks import CheckResult, detect_check, is_test_path, run_check
+from .checks import _TEST_CONFIG_FILE, CheckResult, detect_check, is_test_path, run_check
 
 TAIL_CHARS = 1_500
+# Files that can change WHAT the check command runs. If the agent edited one this turn, the referee does not
+# run the check: that would execute a command the agent just wrote, without the user's approval.
+_DEFINES_CHECK = {"package.json", "Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", "pyproject.toml",
+                  "setup.cfg", "setup.py", "conftest.py", "tox.ini", "noxfile.py", "Cargo.toml", "go.mod",
+                  "Rakefile", "build.gradle", "build.gradle.kts", "pom.xml"}
+
+
+def _defines_check(rel: str) -> bool:
+    return os.path.basename(rel) in _DEFINES_CHECK or bool(_TEST_CONFIG_FILE.search(rel)) or rel.startswith(".git/")
 
 
 def repo_for(changed_paths: list[str]) -> Optional[str]:
@@ -48,6 +57,12 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
     cmd = check or detect_check(root)
     if not cmd:
         return None
+    rel = sorted({os.path.relpath(os.path.realpath(p), root) for p in changed_paths if isinstance(p, str)})
+    risky = [p for p in rel if _defines_check(p)]
+    if risky:
+        info.update(ran=True, repo=os.path.basename(root), check=cmd, ok=None, exit_code=None,
+                    skipped=f"{', '.join(risky[:3])} edited (it can change what the check runs)")
+        return None
     res = runner(cmd, root, timeout_s=timeout_s)
     info.update(ran=True, repo=os.path.basename(root), check=cmd, ok=res.ok, exit_code=res.exit_code,
                 passed=res.passed, failed=res.failed, timed_out=res.timed_out,
@@ -56,7 +71,6 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
         return None
     if res.exit_code is None and not res.timed_out:  # could not even start: not the agent's fault
         return None
-    rel = sorted({os.path.relpath(os.path.realpath(p), root) for p in changed_paths if isinstance(p, str)})
     touched_tests = [p for p in rel if is_test_path(p)]
     counts = (f", {res.passed} passed / {res.failed} failed" if res.passed is not None or res.failed is not None else "")
     status = f"timed out after {timeout_s:.0f} s" if res.timed_out else f"exited {res.exit_code}{counts}"

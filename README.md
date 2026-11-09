@@ -74,9 +74,9 @@ model.
 
 - **Races did not solve more tasks than a plain single attempt** on this setup (plugin v0.2.x). We do not
   claim a solve-rate gain.
-- **False "done" claims are common.** Across the bench races, 22 of 45 attempts that said they were finished
+- **False "done" claims are common.** Across the bench races, 50 of 89 race attempts (75 races, v0.2.x) that said they were finished
   failed the tests when Heats ran them.
-- **Laps rescue attempts.** In 9 of 18 races that had a winner, the winning attempt had failed its first lap
+- **Laps rescue attempts.** In 15 of 39 bench races that had a winner (v0.2.x), the winning attempt had failed its first lap
   and passed after a restart with the real test output.
 - **No tampered wins.** 0 solved runs had edited tests.
 
@@ -141,15 +141,18 @@ Turn the referee off: `hermes config set plugins.entries.heats.settings.referee 
 
 - **Referee:** after the agent edits files with Hermes's file tools in a git repo, runs your check command (the
   `check` setting, or the auto-detected test command) in your checkout, with your permissions, up to 3 times
-  per turn. Appends one line per call to `<HERMES_HOME>/plugin-data/heats/referee.jsonl` (time, session,
-  attempt, whether it sent the agent back, edited paths).
+  per turn. It does not run the check in a turn where the agent edited a file that can change what the check
+  runs (`package.json`, Makefiles, `pyproject.toml`, `setup.cfg`, `conftest.py`, pytest/tox/jest configs, ...);
+  the pane shows "skipped" instead. Appends one line per call to `<HERMES_HOME>/plugin-data/heats/referee.jsonl`
+  (time, session, attempt, whether it sent the agent back, edited paths, repo, exit code and counts) and keeps
+  the last 6 verdicts in `referee_live.json` for the Desktop pane.
 - **Races:** creates git worktrees under `<repo>/.heats/<run_id>/` (added to `.git/info/exclude`, never your
   `.gitignore`) and branches `heats/<run_id>/h<N>`, and removes both when the race ends. Writes one dangling
   snapshot commit (no ref; git's normal garbage collection removes it). Runs your check command in each
   worktree. Launches N subagents through Hermes's subagent lifecycle API on your delegation model and normal
   approval rules; cost scales with N and laps. A race runs on a background thread while it is live.
 - Saves reports, patches and the live snapshot under `<HERMES_HOME>/plugin-data/heats/`.
-- Desktop pane backend routes under `/api/plugins/heats/`: `GET /live`, `GET /runs`, `POST /apply` (applies a
+- Desktop pane backend routes under `/api/plugins/heats/`: `GET /live`, `GET /referee`, `GET /runs`, `POST /apply` (applies a
   heat that passed cleanly; never forced).
 - No network calls of its own, no telemetry, no credentials.
 

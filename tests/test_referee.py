@@ -100,3 +100,14 @@ def test_info_reports_verdict_for_the_pane(tmp_path):
     info2: dict = {}
     referee.review([str(tmp_path / "nowhere.py")], 0, 3, check="pytest", runner=_fake(False, []), info=info2)
     assert info2 == {"ran": False}
+
+
+def test_does_not_run_a_check_the_agent_may_have_just_redefined(tmp_path):
+    r = _repo(tmp_path)
+    calls: list = []
+    for f in ("package.json", "Makefile", "conftest.py", "pyproject.toml", "pytest.ini", "tests/conftest.py"):
+        info: dict = {}
+        assert referee.review([str(r / "m.py"), str(r / f)], 0, 3, check="make test", runner=_fake(False, calls),
+                              info=info) is None
+        assert info["ran"] and "can change what the check runs" in info["skipped"], f
+    assert calls == []
