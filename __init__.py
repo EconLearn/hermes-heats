@@ -525,18 +525,43 @@ def _max_verify_nudges() -> int:
         return 3
 
 
+def _publish_referee(verdict: dict) -> None:
+    """Live view of the referee (its message to the agent is not shown in the chat): keep the last few
+    verdicts in plugin-data for the pane's REST read, and push plugin.heats.referee. Never raises."""
+    try:
+        path = _data_dir() / "referee_live.json"
+        try:
+            items = json.loads(path.read_text(encoding="utf-8")).get("verdicts", [])
+        except (OSError, ValueError):
+            items = []
+        items = (items + [verdict])[-6:]
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"verdicts": items}, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        pass
+    try:
+        from hermes_cli.plugin_events import broadcast_plugin_event
+        broadcast_plugin_event(PLUGIN, "referee", verdict)
+    except Exception:
+        pass
+
+
 def _on_pre_verify(changed_paths: Optional[list] = None, attempt: int = 0, session_id: str = "", **kwargs):
     """Referee: the main agent edited code and wants to finish; run the check, send it back on red."""
     if not _setting("referee", True):
         return None
     try:
         timeout = float(_setting("referee_timeout_seconds", 120))
+        info: dict = {}
         out = _referee.review(list(changed_paths or []), int(attempt or 0), _max_verify_nudges(),
-                              check=_setting("check", "") or None, timeout_s=timeout)
+                              check=_setting("check", "") or None, timeout_s=timeout, info=info)
         rec = {"ts": time.time(), "session_id": session_id, "attempt": attempt, "nudged": bool(out),
-               "paths": list(changed_paths or [])[:20]}
+               "paths": list(changed_paths or [])[:20], **{k: v for k, v in info.items() if k != "check"}}
         with open(_data_dir() / "referee.jsonl", "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
+        if info.get("ran"):
+            _publish_referee({"ts": rec["ts"], "nudged": bool(out), **info})
         return out
     except Exception as exc:  # never break the user's turn
         logger.warning("heats referee failed: %s", exc)

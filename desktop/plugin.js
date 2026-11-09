@@ -28,6 +28,26 @@ function setSnapshot(next) {
   snapshot = next
   listeners.forEach(fn => fn(snapshot))
 }
+// referee verdicts (its message to the agent is not shown in the chat, so the pane shows them)
+let refs = []
+const refListeners = new Set()
+function setRefs(list) {
+  if (!Array.isArray(list)) return
+  refs = list.slice(-6)
+  refListeners.forEach(fn => fn(refs))
+}
+function addRef(v) {
+  if (v && typeof v === 'object' && !refs.some(r => r.ts === v.ts)) setRefs(refs.concat([v]))
+}
+function useRefs() {
+  const [r, setR] = useState(refs)
+  useEffect(() => {
+    refListeners.add(setR)
+    return () => refListeners.delete(setR)
+  }, [])
+  return r
+}
+
 function useSnapshot() {
   const [s, setS] = useState(snapshot)
   useEffect(() => {
@@ -61,6 +81,37 @@ function tests(h) {
 }
 
 // ---- components --------------------------------------------------------------------------
+function RefereeCard() {
+  const list = useRefs()
+  if (!list.length) return null
+  const ago = ts => {
+    const s = Math.max(0, Math.round(Date.now() / 1000 - ts))
+    return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`
+  }
+  return jsxs('div', {
+    className: 'flex flex-col gap-1 rounded-md px-2.5 py-2',
+    style: { border: '1px solid var(--ui-stroke-secondary)' },
+    children: [
+      jsx('div', { className: 'text-[0.75rem] font-medium text-(--ui-text-secondary)', children: 'Referee: tests run when the agent says it is done' }),
+      ...list.slice().reverse().slice(0, 4).map(v => {
+        const red = !v.ok
+        const counts = v.passed != null || v.failed != null ? ` · ${v.passed || 0} passed, ${v.failed || 0} failed` : ''
+        const verdict = v.timed_out ? 'tests timed out' : red ? `tests red (exit ${v.exit_code})` : 'tests green'
+        const action = red ? (v.last_nudge ? ` · sent back (last of ${v.max_nudges})` : ` · sent back (${v.attempt}/${v.max_nudges})`) : ' · done'
+        return jsxs('div', {
+          className: 'flex items-center gap-2 text-[0.75rem]', key: String(v.ts),
+          children: [
+            jsx('span', { style: { width: 8, height: 8, borderRadius: 9999, flex: 'none', background: red ? 'var(--ui-danger, #f85149)' : 'var(--ui-success, #3fb950)' } }),
+            jsx('span', { children: `${v.repo || ''}: ${verdict}${counts}${action}` }),
+            jsx('span', { className: 'ml-auto text-(--ui-text-quaternary)', children: ago(v.ts) })
+          ]
+        })
+      })
+    ]
+  })
+}
+
+
 function Lane({ h, isWinner }) {
   const st = STATUS[h.status] || STATUS.queued
   const live = h.status === 'running' || h.status === 'judging'
@@ -115,7 +166,8 @@ function HeatsPane({ ctx }) {
       className: 'flex h-full flex-col gap-2 p-3 text-sm text-(--ui-text-tertiary)',
       children: [
         jsx('div', { className: 'font-medium text-(--ui-text-secondary)', children: 'Heats' }),
-        jsx('div', { children: 'No run yet. Ask the agent: "use heats (3) to fix the failing test".' })
+        jsx(RefereeCard, {}),
+        jsx('div', { children: 'No race yet. Ask the agent: "use heats (3) to fix the failing test".' })
       ]
     })
   }
@@ -150,6 +202,7 @@ function HeatsPane({ ctx }) {
           jsx('span', { className: 'text-[0.75rem] text-(--ui-text-quaternary)', children: s.run_id })
         ]
       }),
+      jsx(RefereeCard, {}),
       jsx('div', { className: 'text-[0.75rem] text-(--ui-text-tertiary) truncate', title: s.check, children: `check: ${s.check || ''}` }),
       b ? jsx('div', {
         className: 'text-[0.75rem] text-(--ui-text-tertiary)',
@@ -196,6 +249,10 @@ export default {
     const refresh = () => ctx.rest('/live').then(setSnapshot).catch(() => {})
     refresh()
     ctx.onEvent('plugin.heats.run.update', ev => setSnapshot(ev && ev.payload))
+    const refreshRefs = () => ctx.rest('/referee').then(r => setRefs(r && r.verdicts)).catch(() => {})
+    refreshRefs()
+    ctx.onEvent('plugin.heats.referee', ev => addRef(ev && ev.payload))
+    ctx.setInterval(refreshRefs, POLL_MS * 2)
     ctx.setInterval(() => {
       if (!snapshot.run_id || (snapshot.phase !== 'done' && snapshot.phase !== 'error')) refresh()
     }, POLL_MS)

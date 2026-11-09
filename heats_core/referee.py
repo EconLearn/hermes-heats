@@ -35,8 +35,13 @@ def repo_for(changed_paths: list[str]) -> Optional[str]:
 
 
 def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optional[str] = None,
-           timeout_s: float = 120, runner: Callable[..., CheckResult] = run_check) -> Optional[dict]:
-    """Return ``{"action": "continue", "message": ...}`` when the check fails, else None."""
+           timeout_s: float = 120, runner: Callable[..., CheckResult] = run_check,
+           info: Optional[dict] = None) -> Optional[dict]:
+    """Return ``{"action": "continue", "message": ...}`` when the check fails, else None. If *info* is
+    given it is filled with what was measured (for the Desktop pane): ran, repo, check, ok, exit_code,
+    passed, failed, timed_out, last_nudge."""
+    info = {} if info is None else info
+    info["ran"] = False
     root = repo_for(changed_paths)
     if not root:
         return None
@@ -44,6 +49,9 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
     if not cmd:
         return None
     res = runner(cmd, root, timeout_s=timeout_s)
+    info.update(ran=True, repo=os.path.basename(root), check=cmd, ok=res.ok, exit_code=res.exit_code,
+                passed=res.passed, failed=res.failed, timed_out=res.timed_out,
+                last_nudge=attempt + 1 >= max_nudges, attempt=attempt + 1, max_nudges=max_nudges)
     if res.ok:
         return None
     if res.exit_code is None and not res.timed_out:  # could not even start: not the agent's fault

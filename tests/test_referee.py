@@ -90,3 +90,13 @@ def test_auto_detects_check_and_real_run(tmp_path):
 def test_deleted_file_still_maps_to_repo(tmp_path):
     r = _repo(tmp_path)
     assert referee.repo_for([str(r / "gone" / "x.py")]) == os.path.realpath(r)
+
+
+def test_info_reports_verdict_for_the_pane(tmp_path):
+    r = _repo(tmp_path)
+    info: dict = {}
+    referee.review([str(r / "m.py")], 2, 3, check="pytest -q", runner=_fake(False, []), info=info)
+    assert info["ran"] and info["ok"] is False and info["failed"] == 1 and info["last_nudge"] and info["repo"] == "my repo"
+    info2: dict = {}
+    referee.review([str(tmp_path / "nowhere.py")], 0, 3, check="pytest", runner=_fake(False, []), info=info2)
+    assert info2 == {"ran": False}

@@ -51,6 +51,15 @@ async def live():
         return {"run_id": None}
 
 
+@router.get("/referee")
+async def referee():
+    p = _data_dir() / "referee_live.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"verdicts": []}
+
+
 @router.get("/runs")
 async def runs(limit: int = 10):
     out = []
