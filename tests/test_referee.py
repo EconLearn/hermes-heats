@@ -146,3 +146,24 @@ def test_edited_script_named_in_the_check_is_not_run(tmp_path):
     assert calls == [] and "run_tests.sh" in info["skipped"]
     # an unrelated short file name inside a word of the command does not count
     assert referee.review([str(r / "q")], 0, 3, check="pytest -q", runner=_fake(False, calls)) is not None
+
+
+def test_green_after_editing_tests_is_sent_back(tmp_path):
+    r = _repo(tmp_path)
+    info: dict = {}
+    out = referee.review([str(r / "m.py"), str(r / "tests" / "test_m.py")], 1, 3, check="pytest -q",
+                         runner=_fake(True, []), info=info)
+    assert out and out["action"] == "continue"
+    assert "passes now" in out["message"] and "tests/test_m.py" in out["message"]
+    assert "restore them" in out["message"] and "last reminder" not in out["message"]
+    assert info["ok"] is True and info["tests_edited"] == ["tests/test_m.py"]
+    # a new test file at the repo root counts too, and the last nudge says to tell the user
+    out = referee.review([str(r / "m.py"), str(r / "test_new.py")], 2, 3, check="pytest -q", runner=_fake(True, []))
+    assert out and "test_new.py" in out["message"] and "last reminder" in out["message"]
+
+
+def test_green_without_test_edits_still_finishes(tmp_path):
+    r = _repo(tmp_path)
+    info: dict = {}
+    assert referee.review([str(r / "m.py")], 1, 3, check="pytest -q", runner=_fake(True, []), info=info) is None
+    assert "tests_edited" not in info

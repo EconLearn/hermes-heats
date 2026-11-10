@@ -99,14 +99,16 @@ function RefereeCard() {
         const verdict = v.skipped ? `skipped: ${v.skipped}`
           : v.timed_out ? 'tests timed out'
           : v.exit_code == null ? 'check could not start'
-          : red ? `tests red (exit ${v.exit_code})` : 'tests green'
+          : red ? `tests red (exit ${v.exit_code})`
+          : (v.tests_edited && v.tests_edited.length) ? `tests green, but tests edited (${v.tests_edited.slice(0, 2).join(', ')})` : 'tests green'
+        const edited = !red && !v.skipped && v.tests_edited && v.tests_edited.length
         const action = v.nudged
           ? (v.last_nudge ? ` · sent back (last of ${v.max_nudges})` : ` · sent back (${v.attempt}/${v.max_nudges})`)
           : (red || v.skipped ? ' · not sent back' : ' · done')
         return jsxs('div', {
           className: 'flex items-center gap-2 text-[0.75rem]', key: String(v.ts),
           children: [
-            jsx('span', { style: { width: 8, height: 8, borderRadius: 9999, flex: 'none', background: v.skipped ? 'var(--ui-text-quaternary)' : red ? 'var(--ui-danger, #f85149)' : 'var(--ui-success, #3fb950)' } }),
+            jsx('span', { style: { width: 8, height: 8, borderRadius: 9999, flex: 'none', background: v.skipped ? 'var(--ui-text-quaternary)' : red ? 'var(--ui-danger, #f85149)' : edited ? 'var(--ui-warning, #d29922)' : 'var(--ui-success, #3fb950)' } }),
             jsx('span', { children: `${v.repo || ''}: ${verdict}${counts}${action}` }),
             jsx('span', { className: 'ml-auto text-(--ui-text-quaternary)', children: ago(v.ts) })
           ]

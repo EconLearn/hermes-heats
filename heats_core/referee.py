@@ -54,7 +54,7 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
            info: Optional[dict] = None) -> Optional[dict]:
     """Return ``{"action": "continue", "message": ...}`` when the check fails, else None. If *info* is
     given it is filled with what was measured (for the Desktop pane): ran, repo, check, ok, exit_code,
-    passed, failed, timed_out, last_nudge."""
+    passed, failed, timed_out, last_nudge, and tests_edited when a green check came after test edits."""
     info = {} if info is None else info
     info["ran"] = False
     root = repo_for(changed_paths)
@@ -74,8 +74,22 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
     info.update(ran=True, repo=os.path.basename(root), check=cmd, ok=res.ok, exit_code=res.exit_code,
                 passed=res.passed, failed=res.failed, timed_out=res.timed_out,
                 last_nudge=attempt + 1 >= max_nudges, attempt=attempt + 1, max_nudges=max_nudges)
+    touched_tests = [p for p in rel if is_test_path(p)]
     if res.ok:
-        return None
+        if not touched_tests:
+            return None
+        # Green, but only after the agent changed the tests: the same rule as a race (editing tests cannot win).
+        info["tests_edited"] = touched_tests[:6]
+        msg = [f"Heats referee: the check `{cmd}` passes now ({res.passed if res.passed is not None else '?'} passed), "
+               f"but this turn you changed test files: {', '.join(touched_tests[:4])}. A green check after editing the "
+               "tests does not show that the code is fixed.",
+               "Unless the user asked you to change these tests, restore them (git checkout -- <file> for tracked "
+               "files; delete test files you created), fix the code instead, and run the check again. If the user did "
+               "ask for these test changes, say which ones and why, then finish."]
+        if attempt + 1 >= max_nudges:
+            msg.append("This is the referee's last reminder. If you keep the test changes, tell the user plainly that "
+                       "you changed the tests to make the check pass.")
+        return {"action": "continue", "message": "\n".join(msg)}
     # Not the agent's fault, or not knowable: never tell it "your work is not done" for these.
     if res.timed_out:
         info["skipped"] = f"check took longer than {timeout_s:.0f} s"
@@ -83,7 +97,6 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
     if cannot_run(res, cmd):
         info["skipped"] = f"check could not run (exit {res.exit_code})"
         return None
-    touched_tests = [p for p in rel if is_test_path(p)]
     counts = (f", {res.passed} passed / {res.failed} failed" if res.passed is not None or res.failed is not None else "")
     status = f"timed out after {timeout_s:.0f} s" if res.timed_out else f"exited {res.exit_code}{counts}"
     lines = [

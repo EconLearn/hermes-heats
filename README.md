@@ -33,7 +33,10 @@ to the agent only: Hermes keeps it out of the chat history, so in the chat you s
 Desktop pane's Referee card shows each verdict (`tests red (exit 1) · 2 passed, 2 failed · sent back (1/3)`,
 then `tests green · 4 passed, 0 failed · done`). Each referee call is logged to `referee.jsonl` (see Disclosure).
 Hermes allows at most 3 of these per turn (`agent.max_verify_nudges`). On the last one, the agent is told to say
-plainly that the check still fails and to offer a race. If the check passes, the referee stays quiet. It also stays
+plainly that the check still fails and to offer a race. If the check passes, the referee stays quiet, unless
+the agent changed test files in this turn: a green check after editing the tests is sent back too (amber dot:
+`tests green, but tests edited (tests/test_slug.py)`), with the instruction to restore the tests and fix the code
+unless you asked for test changes. Same rule as a race: editing the tests cannot turn the result green. It also stays
 quiet, and the card says `skipped: ...` with the reason, when the agent is not to blame or the check cannot be
 trusted: the check could not run (no test runner, pytest usage error), it ran past the referee's time limit, or the
 agent edited a file that defines the check (`conftest.py`, `pyproject.toml`, `package.json`, a Makefile, ...) or a

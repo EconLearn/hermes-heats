@@ -227,7 +227,7 @@ def collect_patch(wt: str, base: str, ignore: tuple[str, ...] = ()) -> Patch:
     env = {"GIT_INDEX_FILE": tmp_index}
     try:
         if os.path.exists(real_index):
-            shutil.copyfile(real_index, tmp_index)
+            shutil.copy2(real_index, tmp_index)  # keep the mtime: git's racy-entry check depends on it
         else:
             _must(git(["read-tree", "HEAD"], cwd=wt, env_extra=env), "git read-tree in heat")
         excludes = exclude_pathspecs(wt, skip, env_extra=env)
