@@ -781,3 +781,16 @@ def test_unknown_child_state_is_not_trusted_as_finished(repo, tmp_path):
     # heat 2's pass ends the race and heat 1 is stopped
     assert rep.winner is not None and rep.winner.index == 2
     assert by[1].agent_state in ("STOPPED", "SUCCEEDED")
+
+
+def test_live_seconds_counts_while_running():
+    import time as _t
+    from heats_core.runner import _live_seconds
+    from heats_core.scoring import HeatResult
+    h = HeatResult(index=1, strategy="standard", model="m")
+    h._status = "running"
+    h._t0 = _t.monotonic() - 12
+    assert 11 <= _live_seconds(h) <= 14
+    h._status = "pass"
+    h.duration_s = 30.0
+    assert _live_seconds(h) == 30.0

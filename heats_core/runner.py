@@ -35,6 +35,14 @@ DEFAULT_STRATEGIES = [
 CANNOT_RUN_EXIT_CODES = (126, 127)  # shell: not executable / command not found
 
 
+
+def _live_seconds(h) -> float:
+    """Elapsed seconds for the live view: the final duration once known, else time since the heat (re)started."""
+    t = getattr(h, "_t0", None)
+    if getattr(h, "_status", "") == "running" and t is not None:
+        return round(time.monotonic() - t, 1)
+    return h.duration_s
+
 class Launcher(Protocol):
     def launch(self, *, goal: str, context: str, model: Optional[str], key: str) -> Any: ...
     def task_keys(self, handle: Any) -> list[str]: ...
@@ -258,6 +266,7 @@ class Runner:
                     self.isolation.add(k, lane)
                 handles[h.index] = handle
                 t0[h.index] = time.monotonic()
+                h._t0 = t0[h.index]  # type: ignore[attr-defined]  # live elapsed time for the pane
                 h._status = "running"  # type: ignore[attr-defined]
                 h._lane = lane  # type: ignore[attr-defined]
             self.progress(f"heats {run_id}: {len(handles)} attempts running")
@@ -271,6 +280,7 @@ class Runner:
             unknown_since: dict[int, float] = {}
             stop_noted = False
             race_won = False
+            last_tick = time.monotonic()
 
             def stop_pending(reason: str, state: str) -> None:
                 for i in sorted(pending):
@@ -328,6 +338,9 @@ class Runner:
                         self._emit("running", heats)
                         futures[i] = judging[i] = pool.submit(
                             self._judge, h, root, lanes[i][0], base, check, cfg, guard, run_dir)
+                if pending and time.monotonic() - last_tick >= 5:  # keep the pane's elapsed times moving
+                    last_tick = time.monotonic()
+                    self._emit("running", heats)
                 if not pending and judging:
                     time.sleep(0.05)
                 done_now = [i for i, f in judging.items() if f.done()]
@@ -459,6 +472,7 @@ class Runner:
         laps_used[i] = lap
         h.laps = lap
         t0[i] = time.monotonic() - h.duration_s   # duration keeps counting across laps
+        h._t0 = t0[i]  # type: ignore[attr-defined]
         h._status = "running"  # type: ignore[attr-defined]
         pending.add(i)
         self.progress(f"heats {run_id}: heat {i} did not pass; lap {lap} of {cfg.laps} started")
@@ -482,7 +496,7 @@ class Runner:
                     c = h.check
                     rows.append({
                         "index": h.index, "strategy": h.strategy, "model": h.model,
-                        "status": getattr(h, "_status", "queued"), "seconds": h.duration_s,
+                        "status": getattr(h, "_status", "queued"), "seconds": _live_seconds(h),
                         "passed": c.passed if c else None, "failed": c.failed if c else None,
                         "check_ok": bool(c and c.ok), "insertions": h.insertions, "deletions": h.deletions,
                         "files": len(h.files), "guarded": bool(h.guarded), "qualifies": h.qualifies,
