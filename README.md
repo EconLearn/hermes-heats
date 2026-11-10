@@ -81,21 +81,23 @@ Same free local model throughout (qwen3-4b-instruct-2507, Q4, via Ollama), 10 sm
 tiny repo with failing tests. Solved = the tests pass in your checkout afterwards and the test files are unchanged.
 Small samples, one weak model: read these as evidence about the mechanism, not a general benchmark.
 
-**Bench v6 (Heats v0.3.0, 9 Nov):** three arms run back to back on every task, 2 runs each.
+**Bench v6 + v7 (9-10 Nov):** three arms run back to back on every task. v6 ran Heats v0.3.0 twice per task;
+v7 repeated it with v0.3.1 on the same tasks, model and machine (two more runs per task).
 
-| Arm | Solved |
-|---|---|
-| Plain Hermes | 8/20 |
-| Hermes + Heats referee | 12/20 |
-| Heats race, one attempt (`heats_run n=1`) | 16/20 |
+| Arm | v6 | v7 (replication) | Both |
+|---|---|---|---|
+| Plain Hermes | 8/20 | 14/20 | 22/40 |
+| Hermes + Heats referee | 12/20 | 12/20 | 24/40 |
+| Heats race, one attempt (`heats_run n=1`) | 16/20 | 12/20 | 28/40 |
 
-- Same task and run, head to head: the race solved 8 that plain Hermes did not, and plain Hermes solved 0 that
-  the race did not (exact sign test p = 0.01). The referee: 6 vs 2 (p = 0.29, not significant).
-- Plain Hermes failed mostly by stopping after 2-5 minutes with the tests still red; only 1 of its 12 failures
-  hit the time limit.
-- The referee sent the agent back 19 times in 8 runs.
-- 0 solved runs had edited tests.
-<!-- MEASURED v7: replication on v0.3.1 running; lead fills -->
+- **The v6 gain did not replicate.** In v6, on the same task and run, the race solved 8 that plain Hermes did not, and plain Hermes 0 that it did not
+  (exact sign test p = 0.01). In v7 it was 1 vs 3. Both benches together: 9 vs 3 (p = 0.15), referee 8 vs 6.
+  Plain Hermes itself moved from 8/20 to 14/20 between the two benches, so run-to-run noise on this model is
+  as large as the effect we were looking for. We do not claim that Heats raises the solve rate.
+- What held in every run: **none of the 74 solved runs (of 120) had edited tests**; the referee
+  ran 66 checks and sent the agent back 39 times in 16 of 40 runs, each time with the real failing output (3 of those 16 runs then ended solved).
+  Each send-back is a moment the 4B model was about to say "done" with the tests red.
+- Raw results, scripts and the summary: `bench/` (`RESULTS_v7.md`, `summarize_v7.py`).
 
 **Before v0.3.0 the race did not help** (v0.2.x, one RTX 4060): one attempt solved 7/20 against 11/20 for plain
 Hermes. The cause was in Heats: attempts ran without Hermes's coding brief, were told to edit before testing, and a
