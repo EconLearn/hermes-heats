@@ -15,6 +15,8 @@ of the output. Then:
 - Do not edit, delete or skip tests to make them pass.
 - If the message says it is the last reminder and the check still fails, tell the user plainly that it fails
   and offer a race with `heats_run`. Do not claim the fix works.
+- If the note says the repo is not approved yet, you cannot approve it: finish, and end your answer with the
+  `/heats trust <repo>` line it gives, for the user.
 - No referee message does not mean the check passed. The referee stays silent when the check could not run,
   took too long, or when you edited a file that defines it (`conftest.py`, `pyproject.toml`, `package.json`,
   a Makefile, ...). Run the check yourself before you say a fix is done.

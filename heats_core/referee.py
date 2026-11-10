@@ -51,10 +51,11 @@ def repo_for(changed_paths: list[str]) -> Optional[str]:
 
 def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optional[str] = None,
            timeout_s: float = 120, runner: Callable[..., CheckResult] = run_check,
-           info: Optional[dict] = None) -> Optional[dict]:
+           info: Optional[dict] = None, allowed: Optional[Callable[[str], bool]] = None) -> Optional[dict]:
     """Return ``{"action": "continue", "message": ...}`` when the check fails, else None. If *info* is
     given it is filled with what was measured (for the Desktop pane): ran, repo, check, ok, exit_code,
-    passed, failed, timed_out, last_nudge, and tests_edited when a green check came after test edits."""
+    passed, failed, timed_out, last_nudge, and tests_edited when a green check came after test edits.
+    *allowed(root)* is the owner's approval: when it says no, nothing runs and info gets ``untrusted``."""
     info = {} if info is None else info
     info["ran"] = False
     root = repo_for(changed_paths)
@@ -69,6 +70,10 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
     if risky:
         info.update(ran=True, repo=os.path.basename(root), check=cmd, ok=None, exit_code=None,
                     skipped=f"{', '.join(risky[:3])} edited (it can change what the check runs)")
+        return None
+    if allowed is not None and not allowed(root):
+        info.update(ran=True, repo=os.path.basename(root), root=root, check=cmd, ok=None, exit_code=None,
+                    untrusted=True, skipped="repo not approved yet (/heats trust)")
         return None
     res = runner(cmd, root, timeout_s=timeout_s)
     info.update(ran=True, repo=os.path.basename(root), check=cmd, ok=res.ok, exit_code=res.exit_code,

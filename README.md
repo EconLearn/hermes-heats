@@ -31,7 +31,7 @@ also has Model and Time columns.*
 
 ## What it does
 
-**1. The referee (on by default, no setup).** Hermes fires a `pre_verify` hook when the agent has edited files
+**1. The referee (on by default; you approve each repo once).** Hermes fires a `pre_verify` hook when the agent has edited files
 in this turn and is about to finish. Heats then runs your check command in your checkout. If the check fails,
 the agent is sent back with the exit code, the pass/fail counts and the tail of the test output. The message goes
 to the agent only: Hermes keeps it out of the chat history, so in the chat you see the agent carrying on; the
@@ -127,7 +127,15 @@ git clone https://github.com/EconLearn/hermes-heats ~/.hermes/plugins/heats && h
 
 ## Use
 
-The referee needs nothing: it works on every turn where the agent edits code in a git repo.
+Approve a repo once, so Heats may run its tests (they are the repo's own code):
+
+```
+/heats trust            # in a chat: the current repo     (or: hermes heats trust ~/code/myproject)
+```
+
+Until then the referee runs nothing there. The first time the agent edits code in that repo it gets one note
+and ends its answer with that `/heats trust <repo>` line. After that, the referee works on every turn where the
+agent edits code in the repo. Undo with `/heats untrust`.
 
 For a race, ask in plain words: *"use heats (3) to fix the failing parser test"*.
 
@@ -154,6 +162,8 @@ hermes heats list|show|apply ...         # the same from the shell
 |---|---|---|
 | `referee` | true | Run the check when the agent edited code and is about to finish; send it back if it fails |
 | `referee_timeout_seconds` | 25 | Time limit for the referee's check, capped 5 s below Hermes's `plugins.hook_callback_timeout` (30 s by default). A check that runs longer is skipped, never blamed on the agent |
+| `trusted_repos` | [] | Repos whose check Heats may run without asking. Only you add to it (`/heats trust`). The referee skips other repos; `heats_run` asks first |
+| `check_env` | [] | Extra environment variable names the check may see (it gets a minimal environment, see below) |
 | `check` | (empty) = auto-detect | Command that exits 0 on success. Used by the referee and by races |
 | `check_timeout_seconds` | 600 | Time limit for one run of the check in a race |
 | `default_heats` | 3 | Attempts per race (1-8) |
@@ -171,7 +181,17 @@ Turn the referee off: `hermes config set plugins.entries.heats.settings.referee 
 
 ## What it does on your machine (disclosure)
 
-- **Referee:** after the agent edits files with Hermes's file tools in a git repo, runs your check command (the
+- **Approval:** the check is repository code (test scripts, `conftest.py`, Makefiles, the repo's `.venv`
+  Python), and Heats runs it outside Hermes's terminal approval. So it runs nothing in a repo until you approve it:
+  the referee only runs in repos on your `trusted_repos` list (empty by default; added by `/heats trust` or
+  `hermes heats trust`, never by the agent). Every `heats_run` call goes through Hermes's human-approval gate
+  (`pre_tool_call` `approve`) when the model chose the check, or when the repo is not on the list. The prompt
+  shows the exact command.
+- **Environment:** the check runs with a minimal environment: `PATH`, `HOME`, user/shell, locale (`LANG`,
+  `LC_*`), temp dirs, `TERM`/`TZ`, virtualenv and toolchain paths (`PYTHONPATH`, `VIRTUAL_ENV`, `CONDA_PREFIX`,
+  `NODE_PATH`, Go/Cargo/Java homes), plus `CI=1` and `NO_COLOR=1`. Nothing else from Hermes's environment,
+  so provider keys and tokens never reach repo code. Add names your tests need with `check_env`.
+- **Referee:** after the agent edits files with Hermes's file tools in a trusted git repo, runs your check command (the
   `check` setting, or the auto-detected test command) in your checkout, with your permissions, up to 3 times
   per turn, each run limited to `referee_timeout_seconds` (25 s). It does not run the check in a turn where the
   agent edited a file that can change what the check runs (`package.json`, Makefiles, `pyproject.toml`,

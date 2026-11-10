@@ -1,5 +1,5 @@
 name: heats
-version: "0.3.3"
+version: "0.4.0"
 manifest_version: 2
 api_version: 1
 description: "Your tests, not the model, decide when a fix is done: a referee runs your check before the agent finishes and sends it back on red; for hard bugs, race N attempts in git worktrees and apply the one that passes."
@@ -23,6 +23,8 @@ config_schema:
   check: {type: str, default: "", label: "Check command", description: "Command that exits 0 on success. Empty = auto-detect (pytest, npm/pnpm/yarn test, cargo test, go test, make test)."}
   check_timeout_seconds: {type: int, default: 600, label: "Check timeout (seconds)"}
   referee: {type: bool, default: true, label: "Referee", description: "When the agent edited code in a git repo and is about to finish, run the check; if it fails, send the agent back with the real output (up to Hermes's max_verify_nudges, 3)."}
+  trusted_repos: {type: list, default: [], label: "Trusted repos", description: "Repos whose check Heats may run without asking. Empty by default: the referee skips other repos (and tells the agent to point you to /heats trust), and heats_run asks before it runs a check there. Only you add to it: /heats trust [repo] or `hermes heats trust [repo]`."}
+  check_env: {type: list, default: [], label: "Extra env names for the check", description: "The check runs with a minimal environment (PATH, HOME, locale, temp dir, virtualenv/toolchain paths). Add any other variable names your tests need here. Provider keys never reach it unless you list them."}
   referee_timeout_seconds: {type: int, default: 25, label: "Referee check timeout (seconds)", description: "Capped 5 s below Hermes's plugins.hook_callback_timeout (default 30 s); raise that for slower test suites. A check that runs longer is skipped, never blamed on the agent."}
   models: {type: list, default: [], label: "Models to race", description: "Optional model names; attempts cycle through them. Empty = the delegation model."}
   toolsets: {type: list, default: ["terminal", "file"], label: "Attempt toolsets", description: "Toolsets each attempt may use (never broader than the parent's)."}

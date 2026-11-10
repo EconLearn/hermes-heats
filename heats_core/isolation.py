@@ -450,7 +450,9 @@ def _git_verdict(args: list[str], cwd: Optional[str]) -> Optional[tuple[str, str
 _GIT_WORDS = ("stash", "config", "worktree", "gc", "prune", "push", "fetch", "pull", "remote", "update-ref",
               "reflog", "filter-branch", "filter-repo", "notes", "submodule", "lfs", "branch", "tag", "checkout",
               "switch", "symbolic-ref", "update-index", "replace", "init", "maintenance", "pack-refs", "repack")
-_LOOSE_GIT = re.compile(r"(?<![\w.-])git(?![\w.-])[\s'\",\[\]\\]+(?:-\S+[\s'\",\]]+)*(" + "|".join(map(re.escape, _GIT_WORDS)) + r")\b",
+# Options between `git` and the subcommand: an option cannot contain its own separators and at most 16 are
+# skipped, so the match is linear (an unbounded `-\S+` backtracked exponentially on inputs like "git -,,-,,...").
+_LOOSE_GIT = re.compile(r"(?<![\w.-])git(?![\w.-])[\s'\",\[\]\\]+(?:-[^\s'\",\[\]\\]+[\s'\",\]]+){0,16}(" + "|".join(map(re.escape, _GIT_WORDS)) + r")\b",
                         re.I)
 
 

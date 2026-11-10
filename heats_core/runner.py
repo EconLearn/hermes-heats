@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -109,6 +110,20 @@ class RunReport:
 
 def new_run_id() -> str:
     return time.strftime("%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+
+
+_RUN_ID = re.compile(r"\d{4}-\d{6}-[0-9a-f]{4}")
+
+
+def valid_run_id(run_id: object) -> bool:
+    """Only the shape new_run_id() makes: no '/', no '..', no absolute path can reach the runs folder."""
+    return isinstance(run_id, str) and bool(_RUN_ID.fullmatch(run_id))
+
+
+def _run_dir(data_dir: str | Path, run_id: str) -> Path:
+    if not valid_run_id(run_id):
+        raise FileNotFoundError(f"no Heats run '{str(run_id)[:40]}' (run ids look like 1110-083617-ab12)")
+    return Path(data_dir) / "runs" / run_id
 
 
 _EDIT_RULES = ("Edit with the patch tool (replace the exact faulty lines); use write_file only for new files, and "
@@ -537,7 +552,7 @@ class Runner:
 
 # ---------------------------------------------------------------- saved runs
 def load_report(data_dir: str | Path, run_id: str) -> dict:
-    p = Path(data_dir) / "runs" / run_id / "report.json"
+    p = _run_dir(data_dir, run_id) / "report.json"
     if not p.is_file():
         raise FileNotFoundError(f"no Heats run '{run_id}'")
     return json.loads(p.read_text(encoding="utf-8"))

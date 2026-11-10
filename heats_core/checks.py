@@ -188,6 +188,28 @@ def point_at_worktree(command: str, cwd: str, repo_root: Optional[str] = None) -
     return _rewrite_command(command, Lane(root=root, worktree=wt, heat=0))
 
 
+# The check runs repository code (test scripts, conftest.py, Makefiles). It gets only what a test run needs,
+# never the rest of Hermes's environment: provider keys and tokens must not reach repo code.
+_ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "TMPDIR", "TMP", "TEMP",
+             "PYTHONPATH", "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "PYENV_VERSION", "NODE_PATH",
+             "NVM_DIR", "NVM_BIN", "GOPATH", "GOROOT", "GOCACHE", "GOMODCACHE", "GOFLAGS", "CARGO_HOME",
+             "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "JAVA_HOME", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC",
+             "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA")
+
+
+EXTRA_ENV: list = []  # names the owner listed in the plugin's ``check_env`` setting (the plugin sets this)
+
+
+def check_env(extra_names: Optional[list] = None) -> dict:
+    """A minimal environment for the check: the names above, LC_*, the owner's EXTRA_ENV names, and the
+    CI/colour settings. Nothing else from os.environ."""
+    names = EXTRA_ENV if extra_names is None else extra_names
+    keep = set(_ENV_KEEP) | {n for n in (names or []) if isinstance(n, str) and n}
+    env = {k: v for k, v in os.environ.items() if k in keep or k.startswith("LC_")}
+    env.update({"CI": "1", "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1", "FORCE_COLOR": "0"})
+    return env
+
+
 def run_check(command: str, cwd: str, timeout_s: float = 600, env_extra: Optional[dict] = None,
               max_output_bytes: int = 8_000_000, repo_root: Optional[str] = None) -> CheckResult:
     """Run *command* in *cwd* through the shell. Output goes to a temp file (memory stays flat), the
@@ -203,9 +225,7 @@ def run_check(command: str, cwd: str, timeout_s: float = 600, env_extra: Optiona
             env_extra = dict(env_extra or {})
             prev = env_extra.get("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
             env_extra["PYTHONPATH"] = os.pathsep.join(extra_path + ([prev] if prev else []))
-    env = dict(os.environ)
-    env.update({"CI": "1", "PYTHONDONTWRITEBYTECODE": "1", "NO_COLOR": "1", "FORCE_COLOR": "0"})
-    env.pop("PYTEST_ADDOPTS", None)
+    env = check_env()
     if env_extra:
         env.update(env_extra)
     start = time.monotonic()

@@ -75,6 +75,37 @@ def _setting(key: str, default: Any) -> Any:
         return default
 
 
+def _trusted_repos() -> list[str]:
+    """Repos whose test command the owner approved (plugin setting ``trusted_repos``, empty by default).
+    Only the owner adds to it: /heats trust, `hermes heats trust`, or the config file."""
+    raw = _setting("trusted_repos", []) or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [os.path.realpath(os.path.expanduser(p.strip())) for p in raw if isinstance(p, str) and p.strip()]
+
+
+def _is_trusted(root: Optional[str]) -> bool:
+    return bool(root) and os.path.realpath(root) in _trusted_repos()
+
+
+def _trust(path: str, add: bool = True) -> str:
+    cwd = os.path.realpath(os.path.expanduser(path or _cwd()))
+    root = gitops.repo_root(cwd) if os.path.isdir(cwd) else None
+    if not root:
+        return f"{cwd} is not inside a git repository."
+    root = os.path.realpath(root)
+    cur = _trusted_repos()
+    new = (cur + [root]) if add and root not in cur else [p for p in cur if p != root] if not add else cur
+    if new != cur:
+        _CTX.set_config("trusted_repos", new)
+    from .heats_core.checks import detect_check
+    cmd = _setting("check", "") or detect_check(root) or "(no check found)"
+    if add:
+        return (f"Heats will now run `{cmd}` in {root} when the agent edits code there (the referee) and when you "
+                f"race attempts. Undo with /heats untrust {root}")
+    return f"Heats will no longer run the check in {root} without asking."
+
+
 def _publish(snapshot: dict) -> None:
     """Live view: write the latest snapshot for the Desktop pane's REST read, and push it as
     the event plugin.heats.run.update to any connected Desktop window. Never raises."""
@@ -239,6 +270,7 @@ def _handle_run(args: dict, **kwargs) -> str:
         return _err(f"{cwd} is not inside a git repository; Heats needs git worktrees (run `git init` and commit once)")
     if getattr(_CTX, "subagent_lifecycle", None) is None:
         return _err("this Hermes has no subagent lifecycle API; update Hermes to use Heats")
+    _load_check_env()
     run_id = new_run_id()
     cfg.run_id = run_id
     runner = Runner(LifecycleLauncher(_CTX, toolsets), _ISOLATION, _data_dir(),
@@ -394,8 +426,38 @@ def _misrouted_call(tool_name: str, args: Optional[dict]) -> Optional[str]:
             f"listed); otherwise call {hit} directly.")
 
 
+def _heats_run_approval(args: Optional[dict]) -> Optional[dict]:
+    """heats_run runs a shell check in the repo and in every attempt worktree, outside Hermes's terminal
+    approval. Ask the human first whenever the model chose the check, or the repo is not on the owner's
+    trusted list (an auto-detected check still runs repo code: test scripts, conftest.py, Makefiles)."""
+    import hashlib
+    from .heats_core.checks import detect_check
+    a = args if isinstance(args, dict) else {}
+    model_check = a.get("check").strip() if isinstance(a.get("check"), str) else ""
+    cwd = os.path.expanduser(a.get("repo_path") or _cwd()) if isinstance(a.get("repo_path") or "", str) else ""
+    root = gitops.repo_root(cwd) if cwd and os.path.isdir(cwd) else None
+    if not root:
+        return None  # the tool itself refuses: not a git repo
+    root = os.path.realpath(root)
+    if not model_check and _is_trusted(root):
+        return None
+    check = model_check or _setting("check", "") or detect_check(root)
+    if not check:
+        return None  # nothing to run; the tool reports that no check was found
+    who = "the model chose this check" if model_check else "auto-detected; this repo is not on the trusted list"
+    return {"action": "approve",
+            "message": f"heats_run will run `{check}` in {root} and in each attempt's git worktree ({who})",
+            "rule_key": "heats_run:" + hashlib.sha256(f"{root}\0{check}".encode()).hexdigest()[:16]}
+
+
 def _on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, **kwargs):
     lane = _lane_for(kwargs)
+    if lane is None and tool_name == "heats_run":
+        try:
+            return _heats_run_approval(args)
+        except Exception as exc:  # hooks fail open: an error here must refuse, not allow
+            logger.warning("heats: heats_run approval check failed: %s", exc)
+            return {"action": "block", "message": f"Heats could not check this heats_run call safely ({type(exc).__name__})."}
     if lane is None:
         msg = _misrouted_call(tool_name, args)
         return {"action": "block", "message": msg} if msg else None
@@ -456,7 +518,8 @@ def _on_post_tool_call(tool_name: str = "", result: Any = None, **kwargs):
 
 
 # ------------------------------------------------------------ slash + CLI
-USAGE = ("Usage: /heats [list] | /heats show <run_id> [heat] | /heats apply <run_id> [heat] [--force]\n"
+USAGE = ("Usage: /heats [list] | /heats show <run_id> [heat] | /heats apply <run_id> [heat] [--force] | "
+         "/heats trust [repo] | /heats untrust [repo]\n"
          "Start a run by asking the agent, e.g. \"use heats (3) to fix the failing test in tests/test_dates.py\".")
 
 
@@ -485,6 +548,8 @@ def _cmd(raw: str = "", **_) -> str:
                 return (f"Heat {h['index']} ({h['strategy']}, {h.get('model') or 'default'}): "
                         f"{h.get('agent_summary') or ''}\n\n```diff\n{patch[:6000]}\n```\n\nCheck output (tail):\n```\n{tail[-1500:]}\n```")
             return (Path(rep["run_dir"]) / "scoreboard.md").read_text(encoding="utf-8")
+        if sub in ("trust", "untrust"):
+            return _trust(" ".join((raw or "").split()[1:]).strip(), add=sub == "trust")
         if sub == "apply" and len(parts) >= 2:
             heat = next((int(p) for p in parts[2:] if p.isdigit()), None)
             ok, msg = apply_heat(data, parts[1], heat, "--force" in parts)
@@ -506,11 +571,18 @@ def _cli_setup(sub):
     a.add_argument("run_id")
     a.add_argument("heat", nargs="?", type=int)
     a.add_argument("--force", action="store_true")
+    for name, text in (("trust", "Let Heats run the check in this repo without asking"),
+                       ("untrust", "Remove a repo from the trusted list")):
+        t = sp.add_parser(name, help=text)
+        t.add_argument("repo", nargs="?", default=".")
     sub.set_defaults(func=_cli)
 
 
 def _cli(args) -> None:
     c = getattr(args, "heats_command", None) or "list"
+    if c in ("trust", "untrust"):
+        print(_trust(os.path.abspath(getattr(args, "repo", ".") or "."), add=c == "trust"))
+        return
     raw = " ".join(str(x) for x in [c, getattr(args, "run_id", None), getattr(args, "heat", None)] if x)
     if getattr(args, "force", False):
         raw += " --force"
@@ -559,17 +631,44 @@ def _publish_referee(verdict: dict) -> None:
         pass
 
 
+_NOTED: set = set()  # (session, repo) pairs already told that the repo is not approved
+
+
+def _untrusted_note(session_id: str, info: dict) -> Optional[dict]:
+    """Tell the agent once per session and repo why the tests were not run, so it can tell the user how to
+    approve. Never a second time: the agent must not loop on this."""
+    key = (session_id or "", info.get("root") or "")
+    if key in _NOTED:
+        return None
+    _NOTED.add(key)
+    return {"action": "continue", "message": (
+        f"Heats referee (note, not an error): the tests in {info.get('repo')} were not run, because the owner has "
+        f"not approved running this repository's check (`{info.get('check')}`) yet. You cannot approve it. Finish as "
+        f"you would, and end your answer with one line telling the user: to let Heats run `{info.get('check')}` "
+        f"after each code edit in this repository, type /heats trust {info.get('root')}")}
+
+
+def _load_check_env() -> None:
+    from .heats_core import checks as _checks
+    raw = _setting("check_env", []) or []
+    _checks.EXTRA_ENV = [n for n in ([raw] if isinstance(raw, str) else raw) if isinstance(n, str) and n]
+
+
 def _on_pre_verify(changed_paths: Optional[list] = None, attempt: int = 0, session_id: str = "", **kwargs):
     """Referee: the main agent edited code and wants to finish; run the check, send it back on red."""
     if not _setting("referee", True):
         return None
+    _load_check_env()
     try:
         # Hermes abandons a pre_verify callback after plugins.hook_callback_timeout (default 30 s); the check
         # must finish well inside that, or its verdict never reaches the agent.
         timeout = min(float(_setting("referee_timeout_seconds", 25)), max(5.0, _hook_timeout() - 5.0))
         info: dict = {}
         out = _referee.review(list(changed_paths or []), int(attempt or 0), _max_verify_nudges(),
-                              check=_setting("check", "") or None, timeout_s=timeout, info=info)
+                              check=_setting("check", "") or None, timeout_s=timeout, info=info,
+                              allowed=_is_trusted)
+        if info.get("untrusted"):
+            out = _untrusted_note(session_id, info)
         rec = {"ts": time.time(), "session_id": session_id, "attempt": attempt, "nudged": bool(out),
                "paths": list(changed_paths or [])[:20], **{k: v for k, v in info.items() if k != "check"}}
         try:  # logging must never cost the agent its nudge

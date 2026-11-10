@@ -72,8 +72,8 @@ async def runs(limit: int = 10):
 @router.post("/apply")
 async def apply(body: dict):
     run_id = str((body or {}).get("run_id") or "").strip()
-    if not run_id or "/" in run_id or ".." in run_id:
-        raise HTTPException(status_code=400, detail="run_id is required")
+    if not _runner().valid_run_id(run_id):
+        raise HTTPException(status_code=400, detail="run_id is required (shape 1110-083617-ab12)")
     heat = (body or {}).get("heat")
     try:
         ok, msg = _runner().apply_heat(_data_dir(), run_id, int(heat) if heat else None, False)
