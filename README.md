@@ -21,7 +21,8 @@ you>     use heats (3) on the date parser bug
 | 3     | 1    | standard   | FAIL (exit 1) | 3/5   | +1 -1 (1 file)  | agent stopped                              |
 Winner: heat 2. Nothing in your repo has changed yet.
 ```
-*Example, shortened (the real scoreboard also has Model and Time columns).*
+*Example, shortened: the real referee message also names the folder the check ran in, and the real scoreboard
+also has Model and Time columns.*
 
 ## What it does
 
@@ -29,10 +30,14 @@ Winner: heat 2. Nothing in your repo has changed yet.
 in this turn and is about to finish. Heats then runs your check command in your checkout. If the check fails,
 the agent is sent back with the exit code, the pass/fail counts and the tail of the test output. The message goes
 to the agent only: Hermes keeps it out of the chat history, so in the chat you see the agent carrying on; the
-Desktop pane's Referee card shows each verdict (tests red, sent back 1/3; tests green). Each
-referee call is logged to `referee.jsonl` (see Disclosure). Hermes allows at most 3 of these per turn
-(`agent.max_verify_nudges`). On the last one, the agent is told to say plainly that
-the check still fails and to offer a race. If the check passes, or cannot start at all, the referee stays quiet.
+Desktop pane's Referee card shows each verdict (`tests red (exit 1) · 2 passed, 2 failed · sent back (1/3)`,
+then `tests green · 4 passed, 0 failed · done`). Each referee call is logged to `referee.jsonl` (see Disclosure).
+Hermes allows at most 3 of these per turn (`agent.max_verify_nudges`). On the last one, the agent is told to say
+plainly that the check still fails and to offer a race. If the check passes, the referee stays quiet. It also stays
+quiet, and the card says `skipped: ...` with the reason, when the agent is not to blame or the check cannot be
+trusted: the check could not run (no test runner, pytest usage error), it ran past the referee's time limit, or the
+agent edited a file that defines the check (`conftest.py`, `pyproject.toml`, `package.json`, a Makefile, ...) or a
+script the check command names. In that last case Heats will not execute a command the agent just wrote.
 
 **2. Races, when one attempt is not enough.** `heats_run` starts N attempts at the same task. Each works in its
 own git worktree made from your working tree as it is, uncommitted and untracked files included.
@@ -65,7 +70,10 @@ own git worktree made from your working tree as it is, uncommitted and untracked
 
 In Hermes Desktop, a Heats pane shows each heat as a lane: `running`, `running tests`, `lap 2`, `PASS`,
 `FAIL`, or `passed, but edited tests`. The winning lane is outlined and an **Apply winner** button applies it.
-A status-bar chip shows `heats 1/3` while a race runs.
+A status-bar chip shows `heats 1/3` while a race runs. Above the lanes, a Referee card lists the last verdicts
+(red dot: `tests red (exit 1) · 2 passed, 2 failed · sent back (1/3)`; green dot: `tests green · done`; grey dot:
+`skipped: conftest.py edited (it can change what the check runs) · not sent back`), each with how long ago it
+happened. The referee's message to the agent is not in the chat, so this card is where you see it work.
 
 ## Measured
 
@@ -139,7 +147,7 @@ hermes heats list|show|apply ...         # the same from the shell
 | `check` | (empty) = auto-detect | Command that exits 0 on success. Used by the referee and by races |
 | `check_timeout_seconds` | 600 | Time limit for one run of the check in a race |
 | `default_heats` | 3 | Attempts per race (1-8) |
-| `timeout_minutes` | 20 | Unfinished attempts are stopped and judged as they stand |
+| `timeout_minutes` | 20 | Unfinished attempts are stopped and judged as they stand. Capped at 4 hours, so a forgotten race always ends |
 | `laps` | 3 | Launches per attempt; a failing attempt is restarted with the measured check output |
 | `finish_early` | true | The first attempt that passes cleanly ends the race |
 | `models` | [] | Models to race; attempts cycle through them. Empty = the delegation model |
@@ -155,11 +163,14 @@ Turn the referee off: `hermes config set plugins.entries.heats.settings.referee 
 
 - **Referee:** after the agent edits files with Hermes's file tools in a git repo, runs your check command (the
   `check` setting, or the auto-detected test command) in your checkout, with your permissions, up to 3 times
-  per turn. It does not run the check in a turn where the agent edited a file that can change what the check
-  runs (`package.json`, Makefiles, `pyproject.toml`, `setup.cfg`, `conftest.py`, pytest/tox/jest configs, ...);
-  the pane shows "skipped" instead. Appends one line per call to `<HERMES_HOME>/plugin-data/heats/referee.jsonl`
-  (time, session, attempt, whether it sent the agent back, edited paths, repo, exit code and counts) and keeps
-  the last 6 verdicts in `referee_live.json` for the Desktop pane.
+  per turn, each run limited to `referee_timeout_seconds` (25 s). It does not run the check in a turn where the
+  agent edited a file that can change what the check runs (`package.json`, Makefiles, `pyproject.toml`,
+  `setup.cfg`, `setup.py`, `conftest.py`, pytest/tox/nox/jest/vitest configs, `Cargo.toml`, `go.mod`, ...) or a
+  script named in the check command; the pane shows `skipped` with the reason instead. A check that times out
+  or cannot run is also skipped and never blamed on the agent. Appends one line per call to
+  `<HERMES_HOME>/plugin-data/heats/referee.jsonl` (time, session, attempt, whether it sent the agent back,
+  edited paths, repo name, exit code, pass/fail counts, timeout or skip reason) and keeps the last 6 verdicts in
+  `referee_live.json` for the Desktop pane.
 - **Races:** creates git worktrees under `<repo>/.heats/<run_id>/` (added to `.git/info/exclude`, never your
   `.gitignore`) and branches `heats/<run_id>/h<N>`, and removes both when the race ends. Writes one dangling
   snapshot commit (no ref; git's normal garbage collection removes it). Runs your check command in each
@@ -176,11 +187,16 @@ Turn the referee off: `hermes config set plugins.entries.heats.settings.referee 
   commands do not trigger it.
 - The referee runs your whole check. If the repo already has unrelated failing tests, the agent is sent back
   for those too. Set `check` to a narrower command, or turn the referee off.
-- Hermes gives a hook 30 s by default, so the referee skips checks that take longer than ~25 s. For a slower
-  suite, set a narrower `check` or raise `plugins.hook_callback_timeout` (and `referee_timeout_seconds`).
+- Hermes gives a hook 30 s by default (`plugins.hook_callback_timeout`), so the referee's check gets
+  `referee_timeout_seconds` (25 s) or 5 s less than the hook limit, whichever is smaller. A check that runs
+  longer is skipped, not blamed on the agent. For a slower suite, set a narrower `check` or raise both settings.
 - The referee does not compare against failures that existed before the turn; it tells the agent it may say so
-  and finish if failures are unrelated. A check that cannot run (exit 126/127, pytest exit 4/5) is skipped.
+  and finish if failures are unrelated. A check that cannot run (command not found or not executable, exit
+  126/127; pytest usage error or no tests collected, exit 4/5) is skipped.
+- The referee skips the check when the agent edited a file that defines it or a script it names (see
+  Disclosure). The agent is not told; the pane is. Run the check yourself in that case.
 - Races need a git repository with at least one commit, and the local terminal backend.
+- A race ends after `timeout_minutes`, and after 4 hours at the latest whatever the setting.
 - Each lap is a new subagent. It gets the task and what Heats measured, not the previous lap's conversation.
 - Several attempts on one local GPU share it, so each runs slower and may hit the time limit. Locally, use
   fewer heats or a hosted model.
