@@ -6,9 +6,9 @@ When the Hermes agent edits code and is about to say "done", Heats runs your tes
 goes back to work with the real output. If one attempt still can't get them green, Heats races several
 attempts in separate git worktrees and you apply the one that passes. Each attempt is called a *heat*.
 
-![A real run: the 4B model says "All tests now pass"; the Referee card shows 0 passed, 4 failed, sent back](docs/heats_claim_vs_tests.gif)
+![A real run: the 4B model says its fix was "verified ... all 4 tests passing"; the Referee card shows 0 passed, 4 failed, sent back](docs/heats_claim_vs_tests.gif)
 
-*Real Hermes Webapp run, free local model (qwen3-4b Q4 via Ollama). The model claims the tests pass; Heats ran
+*Real Hermes Webapp run, free local model (qwen3-4b Q4 via Ollama). The model claims all 4 tests pass; Heats ran
 them before it could finish: 0 passed, 4 failed.*
 
 ![A real race: three heats, heat 2 (root-cause) wins with 4/4 tests and is applied](docs/race_winner.png)
