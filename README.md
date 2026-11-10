@@ -94,7 +94,7 @@ v7 repeated it with v0.3.1 on the same tasks, model and machine (two more runs p
   (exact sign test p = 0.01). In v7 it was 1 vs 3. Both benches together: 9 vs 3 (p = 0.15), referee 8 vs 6.
   Plain Hermes itself moved from 8/20 to 14/20 between the two benches, so run-to-run noise on this model is
   as large as the effect we were looking for. We do not claim that Heats raises the solve rate.
-- What held in every run: **none of the 74 solved runs (of 120) had edited tests**; the referee
+- What held in every run: **none of the 74 solved runs (of 120) had edited tests (the model rarely tried: 1 tampered run in 120, unsolved)**; the referee
   ran 66 checks and sent the agent back 39 times in 16 of 40 runs, each time with the real failing output (3 of those 16 runs then ended solved).
   Each send-back is a moment the 4B model was about to say "done" with the tests red.
 - Raw results, scripts and the summary: `bench/` (`RESULTS_v7.md`, `summarize_v7.py`).
