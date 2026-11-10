@@ -1,5 +1,5 @@
 name: heats
-version: "0.3.2"
+version: "0.3.3"
 manifest_version: 2
 api_version: 1
 description: "Your tests, not the model, decide when a fix is done: a referee runs your check before the agent finishes and sends it back on red; for hard bugs, race N attempts in git worktrees and apply the one that passes."
