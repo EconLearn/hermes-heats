@@ -201,7 +201,9 @@ Turn the referee off: `hermes config set plugins.entries.heats.settings.referee 
   `<HERMES_HOME>/plugin-data/heats/referee.jsonl` (time, session, attempt, whether it sent the agent back,
   edited paths, repo name, exit code, pass/fail counts, timeout or skip reason) and keeps the last 6 verdicts in
   `referee_live.json` for the Desktop pane.
-- **Races:** creates git worktrees under `<repo>/.heats/<run_id>/` (added to `.git/info/exclude`, never your
+- **Races:** an attempt whose patch touches a file that can change what the check runs (`conftest.py`,
+  `package.json`, Makefiles, pytest/tox configs, a script the check names, ...) is never judged by running the
+  check: it is marked `not run (check config edited)` and cannot win. Creates git worktrees under `<repo>/.heats/<run_id>/` (added to `.git/info/exclude`, never your
   `.gitignore`) and branches `heats/<run_id>/h<N>`, and removes both when the race ends. Writes one dangling
   snapshot commit (no ref; git's normal garbage collection removes it). Runs your check command in each
   worktree. Launches N subagents through Hermes's subagent lifecycle API on your delegation model and normal

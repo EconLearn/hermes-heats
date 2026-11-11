@@ -56,15 +56,20 @@ def _cwd() -> str:
         return os.getcwd()
 
 
+# Heats' own brief for attempt subagents (they do not get Hermes's interactive coding brief). Measured on the
+# bench: without a brief like this a 4B attempt rewrote whole files and claimed passes it did not have far more often.
+CODING_BRIEF = (
+    "You are fixing code in a git checkout. Read the relevant files and find the code with search before you "
+    "change anything; never guess a file's contents or invent an API. Change files only through your file tools "
+    "(patch for edits, write_file for new files): describing a change in the chat does nothing. Touch only what "
+    "the task needs. If a patch fails to apply, read the file again before retrying. Run the check yourself and "
+    "read its output before you say the work is done; fix the cause, not the symptom. Do not commit, push or "
+    "change git branches, and leave secrets and .env files alone."
+)
+
+
 def _coding_brief() -> str:
-    """Hermes's own coding-agent brief. Hermes adds it only on interactive platforms, so subagents
-    (the attempts) never get it; measured: without it a 4B attempt rewrote whole files and claimed
-    passes it did not have far more often than the main agent."""
-    try:
-        from agent.coding_context import CODING_AGENT_GUIDANCE
-        return str(CODING_AGENT_GUIDANCE)
-    except Exception:
-        return ""
+    return CODING_BRIEF
 
 
 def _setting(key: str, default: Any) -> Any:
@@ -426,7 +431,7 @@ def _misrouted_call(tool_name: str, args: Optional[dict]) -> Optional[str]:
             f"listed); otherwise call {hit} directly.")
 
 
-def _heats_run_approval(args: Optional[dict]) -> Optional[dict]:
+def _heats_run_approval(args: Optional[dict], in_attempt: bool = False) -> Optional[dict]:
     """heats_run runs a shell check in the repo and in every attempt worktree, outside Hermes's terminal
     approval. Ask the human first whenever the model chose the check, or the repo is not on the owner's
     trusted list (an auto-detected check still runs repo code: test scripts, conftest.py, Makefiles)."""
@@ -439,12 +444,13 @@ def _heats_run_approval(args: Optional[dict]) -> Optional[dict]:
     if not root:
         return None  # the tool itself refuses: not a git repo
     root = os.path.realpath(root)
-    if not model_check and _is_trusted(root):
+    if not model_check and not in_attempt and _is_trusted(root):
         return None
     check = model_check or _setting("check", "") or detect_check(root)
     if not check:
         return None  # nothing to run; the tool reports that no check was found
-    who = "the model chose this check" if model_check else "auto-detected; this repo is not on the trusted list"
+    who = ("the model chose this check" if model_check else
+           "requested from inside a Heats attempt" if in_attempt else "auto-detected; this repo is not on the trusted list")
     return {"action": "approve",
             "message": f"heats_run will run `{check}` in {root} and in each attempt's git worktree ({who})",
             "rule_key": "heats_run:" + hashlib.sha256(f"{root}\0{check}".encode()).hexdigest()[:16]}
@@ -452,9 +458,11 @@ def _heats_run_approval(args: Optional[dict]) -> Optional[dict]:
 
 def _on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, **kwargs):
     lane = _lane_for(kwargs)
-    if lane is None and tool_name == "heats_run":
+    if tool_name == "heats_run":  # also inside an attempt: adding heats to `toolsets` must not skip the prompt
+        if lane is not None and lane.blocked:
+            return {"action": "block", "message": f"Heats: the run for attempt {lane.heat} has ended; stop now."}
         try:
-            return _heats_run_approval(args)
+            return _heats_run_approval(args, in_attempt=lane is not None)
         except Exception as exc:  # hooks fail open: an error here must refuse, not allow
             logger.warning("heats: heats_run approval check failed: %s", exc)
             return {"action": "block", "message": f"Heats could not check this heats_run call safely ({type(exc).__name__})."}
@@ -602,9 +610,11 @@ def _hook_timeout() -> float:
 
 
 def _max_verify_nudges() -> int:
+    """Hermes's ``agent.max_verify_nudges`` from the public config reader (core default 3)."""
     try:
-        from agent.verify_hooks import max_verify_nudges
-        return int(max_verify_nudges())
+        from hermes_cli.config import read_raw_config
+        v = ((read_raw_config() or {}).get("agent") or {}).get("max_verify_nudges", 3)
+        return max(0, int(3 if v is None else v))
     except Exception:
         return 3
 

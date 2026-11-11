@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
 from . import gitops
-from .checks import cannot_run, CheckResult, Guard, detect_check, run_check
+from .checks import cannot_run, check_defining_edits, CheckResult, Guard, detect_check, run_check
 from .isolation import IsolationMap, Lane
 from .scoring import HeatResult, rank, scoreboard, winner
 
@@ -159,6 +159,8 @@ def build_followup_goal(task: str, heat: int, lap: int, laps: int, check: str, w
                    "you must call write_file or patch")
     if c is None:
         result = "the check could not be run"
+    elif c.exit_code is None and c.error.startswith("not run"):
+        result = f"the check was {c.error}; restore those files (e.g. `git checkout -- <file>`)"
     elif c.timed_out:
         result = "the check timed out"
     else:
@@ -545,6 +547,17 @@ class Runner:
         pf = run_dir / f"heat{h.index}.patch"
         pf.write_bytes(patch.data)
         h.patch_file = str(pf)
+        risky = check_defining_edits(patch.files, check)
+        if risky:
+            # The attempt changed what the check runs (conftest.py, package.json, a Makefile, a script the check
+            # names...). Running it would execute model-written code on the host with no prompt, so it is not run;
+            # the heat cannot win (as the referee refuses the same case).
+            h.guarded = h.guarded + [f for f in risky if f not in h.guarded]
+            h.check = CheckResult(check, None, 0.0, error=f"not run: the attempt edited {', '.join(risky[:4])}, "
+                                  "which can change what the check runs")
+            h._status = "flagged"  # type: ignore[attr-defined]
+            self._emit("running", self._heats_ref)
+            return
         h.check = run_check(check, wt, timeout_s=cfg.check_timeout_s)
         h._status = "pass" if h.qualifies else ("flagged" if h.check.ok else "fail")  # type: ignore[attr-defined]
         self._emit("running", self._heats_ref)

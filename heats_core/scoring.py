@@ -90,7 +90,7 @@ def _fmt_check(c: Optional[CheckResult]) -> str:
     if c.timed_out:
         return "timeout"
     if c.exit_code is None:
-        return "error"
+        return "not run (check config edited)" if c.error.startswith("not run") else "error"
     return "PASS" if c.ok else f"FAIL (exit {c.exit_code})"
 
 

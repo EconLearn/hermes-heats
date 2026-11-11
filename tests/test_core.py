@@ -794,3 +794,53 @@ def test_live_seconds_counts_while_running():
     h._status = "pass"
     h.duration_s = 30.0
     assert _live_seconds(h) == 30.0
+
+
+def test_planted_conftest_is_never_run_and_cannot_win(repo, tmp_path):
+    """Catalog review 2: an attempt that edits a file defining how the check runs (here a conftest.py that turns
+    every failure into a pass and leaves a marker) must not have its check run at all, even with protect_tests off."""
+    marker = tmp_path / "conftest_ran"
+
+    def planted(lane, _):
+        tool_write(lane, "calc.py", "def add(a, b):\n    return a * b\n")  # still broken
+        tool_write(lane, "conftest.py", (
+            "import pytest\n"
+            f"open({str(marker)!r}, 'w').write('ran')\n"
+            "@pytest.hookimpl(hookwrapper=True)\n"
+            "def pytest_runtest_makereport(item, call):\n"
+            "    out = yield\n"
+            "    rep = out.get_result()\n"
+            "    if rep.failed:\n"
+            "        rep.outcome = 'passed'\n"))
+
+    # the planted conftest really would make the broken fix pass: prove it in a scratch copy first
+    scratch = tmp_path / "scratch"
+    sh(f"git clone -q {repo} {scratch}", tmp_path)
+    (scratch / "calc.py").write_text("def add(a, b):\n    return a * b\n")
+    (scratch / "conftest.py").write_text(
+        "import pytest\n@pytest.hookimpl(hookwrapper=True)\ndef pytest_runtest_makereport(item, call):\n"
+        "    out = yield\n    rep = out.get_result()\n    if rep.failed:\n        rep.outcome = 'passed'\n")
+    assert run_check(CHECK, str(scratch)).ok
+
+    for protect in (True, False):
+        iso = IsolationMap()
+        fl = FakeLauncher(iso, [planted, good_fix])
+        rep = Runner(fl, iso, tmp_path / f"d{protect}").run(
+            RunConfig(task="t", n=2, check=CHECK, timeout_s=60, protect_tests=protect, laps=2, min_lap_s=0), cwd=repo)
+        h1 = next(h for h in rep.heats if h.index == 1)
+        assert not marker.exists(), "the attempt's conftest.py was executed"
+        assert h1.check is not None and h1.check.exit_code is None and h1.check.error.startswith("not run")
+        assert "conftest.py" in h1.check.error and "conftest.py" in h1.guarded and not h1.qualifies
+        assert rep.winner is not None and rep.winner.index == 2
+        assert "not run (check config edited)" in rep.markdown()
+        assert len(fl.goals[1]) == 2  # the next lap is told why, and to restore the file
+        assert "not run" in fl.goals[1][1] and "git checkout" in fl.goals[1][1]
+
+
+def test_check_defining_edits_rule():
+    from heats_core.checks import check_defining_edits
+    cmd = "./run_tests.sh -q"
+    assert check_defining_edits(["src/a.py", "tests/conftest.py", "package.json", "pytest.ini", "Makefile",
+                                 "run_tests.sh", ".git/hooks/x", "q"], cmd) == [
+        "tests/conftest.py", "package.json", "pytest.ini", "Makefile", "run_tests.sh", ".git/hooks/x"]
+    assert check_defining_edits(["src/a.py", "tests/test_a.py"], "pytest -q") == []

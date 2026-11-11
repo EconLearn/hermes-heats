@@ -301,3 +301,33 @@ def test_run_ids_from_the_model_cannot_leave_the_runs_folder(plugin, tmp_path):
     assert json.loads(plugin._handle_apply({"run_id": "/etc"}))["ok"] is False
     assert "no Heats run" in plugin._cmd("show ../../x")
     assert "no Heats run" in plugin._cmd("apply /etc")
+
+
+def test_heats_run_inside_an_attempt_always_asks(plugin, tmp_path):
+    from heats_plugin_under_test.heats_core.isolation import Lane
+    ctx = FakeCtx()
+    plugin.register(ctx)
+    repo = _git_repo(tmp_path / "r")
+    plugin._cmd(f"trust {repo}")
+    assert plugin._on_pre_tool_call(tool_name="heats_run", args={"task": "x", "repo_path": str(repo)}) is None
+    plugin._ISOLATION.add("heats-x-h1", Lane(root=str(repo), worktree=str(repo / ".heats" / "x" / "h1"), heat=1))
+    try:
+        out = plugin._on_pre_tool_call(tool_name="heats_run", args={"task": "x", "repo_path": str(repo)},
+                                       task_id="heats-x-h1")
+        assert out["action"] == "approve" and "inside a Heats attempt" in out["message"]
+    finally:
+        plugin._ISOLATION.remove("heats-x-h1") if hasattr(plugin._ISOLATION, "remove") else None
+
+
+def test_uses_only_public_hermes_names(plugin, monkeypatch):
+    src = (ROOT / "__init__.py").read_text()
+    assert "agent.coding_context" not in src and "agent.verify_hooks" not in src
+    assert "patch" in plugin._coding_brief() and "check" in plugin._coding_brief()
+    import types
+    fake = types.ModuleType("hermes_cli.config")
+    fake.read_raw_config = lambda: {"agent": {"max_verify_nudges": 5}}
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    assert plugin._max_verify_nudges() == 5
+    fake.read_raw_config = lambda: {}
+    assert plugin._max_verify_nudges() == 3

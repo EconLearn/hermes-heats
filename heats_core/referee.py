@@ -7,11 +7,10 @@ Pure logic here; the ``pre_verify`` hook in the plugin's __init__ wires it up.""
 from __future__ import annotations
 
 import os
-import re
 from typing import Callable, Optional
 
 from . import gitops
-from .checks import _TEST_CONFIG_FILE, CheckResult, cannot_run, detect_check, is_test_path, run_check
+from .checks import CheckResult, cannot_run, check_defining_edits, detect_check, is_test_path, run_check
 
 TAIL_CHARS = 1_500
 CANNOT_RUN = (126, 127)  # shell: not executable / command not found
@@ -19,15 +18,6 @@ CANNOT_RUN = (126, 127)  # shell: not executable / command not found
 
 def _is_pytest(cmd: str) -> bool:
     return "pytest" in cmd  # pytest exit 4 = usage error (e.g. path not found), 5 = no tests collected
-# Files that can change WHAT the check command runs. If the agent edited one this turn, the referee does not
-# run the check: that would execute a command the agent just wrote, without the user's approval.
-_DEFINES_CHECK = {"package.json", "Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", "pyproject.toml",
-                  "setup.cfg", "setup.py", "conftest.py", "tox.ini", "noxfile.py", "Cargo.toml", "go.mod",
-                  "Rakefile", "build.gradle", "build.gradle.kts", "pom.xml", "build.rs", "config.toml"}
-
-
-def _defines_check(rel: str) -> bool:
-    return os.path.basename(rel) in _DEFINES_CHECK or bool(_TEST_CONFIG_FILE.search(rel)) or rel.startswith(".git/")
 
 
 def repo_for(changed_paths: list[str]) -> Optional[str]:
@@ -65,8 +55,7 @@ def review(changed_paths: list[str], attempt: int, max_nudges: int, check: Optio
     if not cmd:
         return None
     rel = sorted({os.path.relpath(os.path.realpath(p), root) for p in changed_paths if isinstance(p, str)})
-    named = {os.path.basename(w) for w in re.split(r"[\s;&|()<>'\"]+", cmd) if w}  # scripts the check runs
-    risky = [p for p in rel if _defines_check(p) or os.path.basename(p) in named]
+    risky = check_defining_edits(rel, cmd)  # the same rule as a race's judge
     if risky:
         info.update(ran=True, repo=os.path.basename(root), check=cmd, ok=None, exit_code=None,
                     skipped=f"{', '.join(risky[:3])} edited (it can change what the check runs)")

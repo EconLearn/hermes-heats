@@ -361,6 +361,28 @@ def harness_changes(patch: Optional[bytes]) -> list[str]:
     return out
 
 
+# Files that can change WHAT the check command runs. If an edit touched one, Heats does not run the check (neither
+# the referee nor a race's judge): that would execute code the model just wrote, without the user's approval.
+DEFINES_CHECK = {"package.json", "Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", "pyproject.toml",
+                 "setup.cfg", "setup.py", "conftest.py", "tox.ini", "noxfile.py", "Cargo.toml", "go.mod",
+                 "Rakefile", "build.gradle", "build.gradle.kts", "pom.xml", "build.rs", "config.toml"}
+
+
+def check_defining_edits(rel_paths: list, command: str) -> list[str]:
+    """The edited paths (repo-relative) that can change what *command* runs: build/test config files, test
+    runner configs, anything under .git/, and scripts the command names."""
+    named = {os.path.basename(w) for w in re.split(r"[\s;&|()<>'\"]+", command or "") if w}
+    out = []
+    for p in rel_paths or []:
+        if not isinstance(p, str):
+            continue
+        q = p.replace("\\", "/")
+        if (os.path.basename(q) in DEFINES_CHECK or _TEST_CONFIG_FILE.search(q) or q.startswith(".git/")
+                or os.path.basename(q) in named):
+            out.append(p)
+    return out
+
+
 @dataclass
 class Guard:
     """Files a heat may not change: by default every test file and the files that define how the tests
